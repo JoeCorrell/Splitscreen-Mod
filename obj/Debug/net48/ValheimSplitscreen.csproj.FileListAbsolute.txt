@@ -1,0 +1,9 @@
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.csproj.AssemblyReference.cache
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.AssemblyInfoInputs.cache
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.AssemblyInfo.cs
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.csproj.CoreCompileInputs.cache
+C:\Projects\Splitscreen Mod\bin\Debug\net48\ValheimSplitscreen.dll
+C:\Projects\Splitscreen Mod\bin\Debug\net48\ValheimSplitscreen.pdb
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.dll
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.pdb
