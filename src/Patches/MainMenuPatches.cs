@@ -1,7 +1,9 @@
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.UI;
+using ValheimSplitscreen.Config;
 using ValheimSplitscreen.Core;
+using ValheimSplitscreen.UI;
 
 namespace ValheimSplitscreen.Patches
 {
@@ -99,19 +101,116 @@ namespace ValheimSplitscreen.Patches
             _splitscreenButton.name = "SplitscreenButton";
             _splitscreenButton.transform.SetSiblingIndex(settingsIndex + 1);
 
+            // Strip all non-UI scripts from the clone. The cloned Settings button has
+            // Valheim-specific components (ButtonSfx, UITooltip, animation triggers, etc.)
+            // that still reference the Settings panel and will open it on click.
+            StripNonEssentialComponents(_splitscreenButton);
+
             // Change the label
             SetButtonLabel(_splitscreenButton, "Splitscreen");
 
-            // Wire up the click handler
+            // Wire up the click handler — replace onClick entirely to clear
+            // persistent (serialized) listeners copied from the Settings button
             var button = _splitscreenButton.GetComponent<Button>();
             if (button != null)
             {
-                button.onClick.RemoveAllListeners();
+                button.onClick = new Button.ButtonClickedEvent();
                 button.onClick.AddListener(OnSplitscreenButtonClicked);
             }
 
+            // Wire into gamepad navigation chain so controller can reach this button.
+            // Insert between Settings and whatever was below it.
+            SetupControllerNavigation(settingsButton, button);
+
             Debug.Log($"[Splitscreen][Menu] Splitscreen button created at sibling index {settingsIndex + 1}");
             UpdateButtonLabel();
+        }
+
+        /// <summary>
+        /// Remove all MonoBehaviour components from the cloned button that aren't
+        /// essential for rendering and interaction. Keeps: Button, Image, Text/TMP,
+        /// layout components, CanvasRenderer. Destroys everything else (ButtonSfx,
+        /// UITooltip, event triggers, animation scripts, etc.) so clicking the
+        /// cloned button doesn't also trigger the original Settings behavior.
+        /// </summary>
+        private static void StripNonEssentialComponents(GameObject root)
+        {
+            int stripped = 0;
+            var allComponents = root.GetComponentsInChildren<Component>(true);
+            foreach (var comp in allComponents)
+            {
+                if (comp == null) continue;
+                // Keep essential UI components
+                if (comp is RectTransform) continue;
+                if (comp is CanvasRenderer) continue;
+                if (comp is Button) continue;
+                if (comp is Image) continue;
+                if (comp is Text) continue;
+                if (comp is LayoutElement) continue;
+                if (comp is LayoutGroup) continue;
+                if (comp is ContentSizeFitter) continue;
+                if (comp is Selectable) continue;
+                if (comp is Mask) continue;
+                if (comp is RectMask2D) continue;
+
+                // Keep TextMeshPro (check by type name since it's in a separate assembly)
+                string typeName = comp.GetType().Name;
+                if (typeName.Contains("TMP_") || typeName.Contains("TextMeshPro")) continue;
+
+                // Destroy everything else (ButtonSfx, UITooltip, EventTrigger, Animator, etc.)
+                if (comp is MonoBehaviour mb)
+                {
+                    Object.Destroy(mb);
+                    stripped++;
+                }
+                else if (comp is Animator anim)
+                {
+                    Object.Destroy(anim);
+                    stripped++;
+                }
+            }
+            Debug.Log($"[Splitscreen][Menu] Stripped {stripped} non-essential components from cloned button");
+        }
+
+        /// <summary>
+        /// Insert the splitscreen button into the gamepad navigation chain.
+        /// Settings → Splitscreen → (whatever Settings originally pointed down to).
+        /// </summary>
+        private static void SetupControllerNavigation(Button settingsBtn, Button splitBtn)
+        {
+            if (settingsBtn == null || splitBtn == null) return;
+
+            // Get Settings' current navigation
+            var settingsNav = settingsBtn.navigation;
+            Selectable belowSettings = settingsNav.selectOnDown;
+
+            // Settings → down → Splitscreen
+            settingsNav.mode = Navigation.Mode.Explicit;
+            settingsNav.selectOnDown = splitBtn;
+            settingsBtn.navigation = settingsNav;
+
+            // Splitscreen → up → Settings, down → whatever was below Settings
+            var splitNav = splitBtn.navigation;
+            splitNav.mode = Navigation.Mode.Explicit;
+            splitNav.selectOnUp = settingsBtn;
+            splitNav.selectOnDown = belowSettings;
+            // Copy left/right from Settings so horizontal navigation still works
+            splitNav.selectOnLeft = settingsNav.selectOnLeft;
+            splitNav.selectOnRight = settingsNav.selectOnRight;
+            splitBtn.navigation = splitNav;
+
+            // Whatever was below Settings → up → Splitscreen (instead of Settings)
+            if (belowSettings != null)
+            {
+                var belowNav = belowSettings.navigation;
+                if (belowNav.mode == Navigation.Mode.Explicit)
+                {
+                    belowNav.selectOnUp = splitBtn;
+                    belowSettings.navigation = belowNav;
+                }
+            }
+
+            Debug.Log($"[Splitscreen][Menu] Navigation: Settings↓Splitscreen↓{belowSettings?.gameObject.name ?? "null"}");
         }
 
         private static void OnSplitscreenButtonClicked()
@@ -128,32 +227,50 @@ namespace ValheimSplitscreen.Patches
             switch (mgr.State)
             {
                 case SplitscreenState.Disabled:
-                    // Open P2 character select
-                    mgr.State = SplitscreenState.PendingCharSelect;
-                    mgr.CharacterSelect.IsMainMenuMode = true;
+                    // Enter menu split mode
+                    Debug.Log("[Splitscreen][Menu] Entering MenuSplit from button");
+                    mgr.State = SplitscreenState.MenuSplit;
+                    var config = SplitscreenPlugin.Instance?.SplitConfig;
+                    bool horizontal = config?.Orientation?.Value == ValheimSplitscreen.Config.SplitOrientation.Horizontal;
+                    mgr.MenuSplit.Activate(horizontal);
+                    mgr.CharacterSelect.IsMenuSplitMode = true;
+                    mgr.CharacterSelect.IsMainMenuMode = false;
                     mgr.CharacterSelect.Show(
                         onSelected: (profile) =>
                         {
                             mgr.OnP2CharacterSelected(profile);
+                            mgr.MenuSplit.SetP2Ready(profile?.GetName() ?? "New Character");
                             UpdateButtonLabel();
                         },
                         onCancelled: () =>
                         {
+                            mgr.MenuSplit.Deactivate();
                             mgr.State = SplitscreenState.Disabled;
                             UpdateButtonLabel();
                         }
                     );
+                    UpdateButtonLabel();
+                    break;
+
+                case SplitscreenState.MenuSplit:
+                    // Cancel menu split
+                    mgr.CharacterSelect.Hide();
+                    mgr.MenuSplit.Deactivate();
+                    mgr.State = SplitscreenState.Disabled;
+                    mgr.PendingP2Profile = null;
+                    UpdateButtonLabel();
                     break;
 
                 case SplitscreenState.PendingCharSelect:
-                    // Cancel character select
+                    // Legacy cancel
                     mgr.CharacterSelect.Hide();
                     mgr.State = SplitscreenState.Disabled;
                     UpdateButtonLabel();
                     break;
 
                 case SplitscreenState.Armed:
-                    // Disarm
+                    // Disarm and restore full screen
+                    mgr.MenuSplit.Deactivate();
                     mgr.State = SplitscreenState.Disabled;
                     mgr.PendingP2Profile = null;
                     UpdateButtonLabel();
@@ -173,6 +290,9 @@ namespace ValheimSplitscreen.Patches
                 case SplitscreenState.Armed:
                     string name = mgr.PendingP2Profile?.GetName() ?? "New Character";
                     label = $"Splitscreen: {name}";
+                    break;
+                case SplitscreenState.MenuSplit:
+                    label = "Splitscreen: Selecting...";
                     break;
                 case SplitscreenState.PendingCharSelect:
                     label = "Splitscreen: Selecting...";
@@ -252,6 +372,8 @@ namespace ValheimSplitscreen.Patches
         public static void FejdStartup_OnDestroy_Postfix()
         {
             _splitscreenButton = null;
+            // Clean up menu split if still active when leaving main menu
+            SplitScreenManager.Instance?.MenuSplit?.Deactivate();
         }
     }
 }

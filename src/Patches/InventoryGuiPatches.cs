@@ -26,6 +26,12 @@ namespace ValheimSplitscreen.Patches
         private static float _savedPlaneDistance;
         private static int _savedSortingOrder;
 
+        // Saved CanvasScaler state
+        private static bool _hasSavedInvScalerState;
+        private static CanvasScaler.ScaleMode _savedInvScaleMode;
+        private static float _savedInvScaleFactor;
+        private static Vector2 _savedInvRefResolution;
+
         private static bool _hasSavedLayoutState;
         private static Vector3 _savedInventoryScale;
         private static Vector2 _savedInventoryAnchoredPosition;
@@ -138,6 +144,24 @@ namespace ValheimSplitscreen.Patches
                 canvas.sortingOrder = 10;
             }
 
+            // Switch CanvasScaler to ConstantPixelSize to match RT dimensions
+            var invScaler = canvas.GetComponent<CanvasScaler>();
+            if (invScaler != null)
+            {
+                if (!_hasSavedInvScalerState)
+                {
+                    _savedInvScaleMode = invScaler.uiScaleMode;
+                    _savedInvScaleFactor = invScaler.scaleFactor;
+                    _savedInvRefResolution = invScaler.referenceResolution;
+                    _hasSavedInvScalerState = true;
+                }
+                if (invScaler.uiScaleMode != CanvasScaler.ScaleMode.ConstantPixelSize)
+                {
+                    invScaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+                    invScaler.scaleFactor = 1f;
+                }
+            }
+
             ApplyScaledInventoryLayout(__instance, uiCamera);
         }
 
@@ -149,78 +173,165 @@ namespace ValheimSplitscreen.Patches
                 RestoreInventoryLayout(inv);
             }
 
-            if (_hasSavedCanvasState && inv != null)
+            if (inv != null)
             {
                 var canvas = inv.m_inventoryRoot != null
                     ? inv.m_inventoryRoot.GetComponentInParent<Canvas>()
                     : inv.GetComponentInParent<Canvas>();
                 if (canvas != null)
                 {
-                    canvas.renderMode = _savedRenderMode;
-                    canvas.worldCamera = _savedWorldCamera;
-                    canvas.planeDistance = _savedPlaneDistance;
-                    canvas.sortingOrder = _savedSortingOrder;
+                    if (_hasSavedCanvasState)
+                    {
+                        canvas.renderMode = _savedRenderMode;
+                        canvas.worldCamera = _savedWorldCamera;
+                        canvas.planeDistance = _savedPlaneDistance;
+                        canvas.sortingOrder = _savedSortingOrder;
+                    }
+                    if (_hasSavedInvScalerState)
+                    {
+                        var scaler = canvas.GetComponent<CanvasScaler>();
+                        if (scaler != null)
+                        {
+                            scaler.uiScaleMode = _savedInvScaleMode;
+                            scaler.scaleFactor = _savedInvScaleFactor;
+                            scaler.referenceResolution = _savedInvRefResolution;
+                        }
+                    }
                 }
             }
 
             _hasSavedCanvasState = false;
+            _hasSavedInvScalerState = false;
             _activeInventoryPlayerIndex = 0;
             _savedLocalBeforeUpdate = null;
             _swappedLocalForUpdate = false;
         }
+
+        private static float _lastInvButtonLogTime;
+        private static float _lastInvBlockLogTime;
 
         private static void TryOpenInventoryForPlayer2(InventoryGui inventoryGui)
         {
             if (SplitInputManager.Instance == null) return;
 
             var p2 = SplitScreenManager.Instance?.PlayerManager?.Player2;
-            if (p2 == null || p2.IsDead() || p2.InCutscene() || p2.IsTeleporting()) return;
+            if (p2 == null) return;
+            if (p2.IsDead() || p2.InCutscene() || p2.IsTeleporting())
+            {
+                if (SplitscreenLog.ShouldLog("Inv.p2state", 5f))
+                    SplitscreenLog.Log("Inventory", $"P2 blocked: dead={p2.IsDead()}, cutscene={p2.InCutscene()}, teleporting={p2.IsTeleporting()}");
+                return;
+            }
 
             var p2Input = SplitInputManager.Instance.GetInputState(1);
             if (p2Input == null) return;
 
-            bool openPressed = p2Input.GetButtonDown("Inventory") || p2Input.GetButtonDown("JoyButtonY");
+            bool invPressed = p2Input.GetButtonDown("Inventory");
+            bool joyYPressed = p2Input.GetButtonDown("JoyButtonY");
+            bool openPressed = invPressed || joyYPressed;
+
+            // Log button state periodically even when not pressed (to verify input is working)
+            if (Time.time - _lastInvButtonLogTime > 5f)
+            {
+                _lastInvButtonLogTime = Time.time;
+                bool hasInv = p2.GetInventory() != null;
+                int itemCount = hasInv ? p2.GetInventory().GetAllItems().Count : -1;
+                SplitscreenLog.Log("Inventory", $"P2 input check: Inventory={p2Input.GetButton("Inventory")}, JoyButtonY={p2Input.GetButton("JoyButtonY")}, hasInventory={hasInv}, items={itemCount}");
+            }
+
             if (!openPressed) return;
+
+            SplitscreenLog.Log("Inventory", $"P2 pressed inventory! invPressed={invPressed}, joyYPressed={joyYPressed}");
 
             // If inventory is already visible...
             if (IsInventoryVisible(inventoryGui))
             {
+                // Consume button-down state to prevent original Update from re-toggling
+                p2Input.SelectButtonDown = false;
+                p2Input.ButtonNorthDown = false;
+
                 if (_activeInventoryPlayerIndex == 1)
                 {
-                    // P2 owns it — close it
                     SplitscreenLog.Log("Inventory", "P2 closing own inventory");
                     inventoryGui.Hide();
                     _activeInventoryPlayerIndex = 0;
                 }
                 else
                 {
-                    // P1 owns it — transfer to P2
                     SplitscreenLog.Log("Inventory", "Transferring inventory from P1 to P2");
                     inventoryGui.Hide();
                     _activeInventoryPlayerIndex = 1;
                     ExecuteAsPlayer(p2, () =>
                     {
-                        inventoryGui.Show(null);
+                        inventoryGui.Show(null, 1);
                     });
+                }
+                ZInput.ResetButtonStatus("Inventory");
+                ZInput.ResetButtonStatus("JoyButtonY");
+                return;
+            }
+
+            // Inventory not visible — check blocking conditions with logging
+            bool consoleVisible = global::Console.IsVisible();
+            bool menuVisible = Menu.IsVisible();
+            bool minimapOpen = Minimap.IsOpen();
+            bool inRadial = Hud.InRadial();
+            bool pieceSelection = Hud.IsPieceSelectionVisible();
+            bool chatFocused = Chat.instance != null && Chat.instance.HasFocus();
+            bool textViewerVisible = TextViewer.instance != null && TextViewer.instance.IsVisible();
+            bool freeFly = GameCamera.InFreeFly();
+
+            bool blocked = consoleVisible || menuVisible || minimapOpen || inRadial || pieceSelection || chatFocused || textViewerVisible || freeFly;
+            if (blocked)
+            {
+                if (Time.time - _lastInvBlockLogTime > 2f)
+                {
+                    _lastInvBlockLogTime = Time.time;
+                    SplitscreenLog.Log("Inventory", $"P2 inv BLOCKED: console={consoleVisible}, menu={menuVisible}, minimap={minimapOpen}, radial={inRadial}, pieceSelect={pieceSelection}, chat={chatFocused}, textViewer={textViewerVisible}, freeFly={freeFly}");
                 }
                 return;
             }
 
-            // Inventory not visible — check blocking conditions
-            if (global::Console.IsVisible() || Menu.IsVisible() || Minimap.IsOpen() || Hud.InRadial() || Hud.IsPieceSelectionVisible())
-                return;
-            if (Chat.instance != null && Chat.instance.HasFocus()) return;
-            if (TextViewer.instance != null && TextViewer.instance.IsVisible()) return;
-            if (GameCamera.InFreeFly()) return;
-
             // Open fresh for P2
+            string p1Name = global::Player.m_localPlayer?.GetPlayerName() ?? "null";
+            SplitscreenLog.Log("Inventory", $"P2 opening inventory — no blockers, m_localPlayer={p1Name}, P2={p2.GetPlayerName()}");
             _activeInventoryPlayerIndex = 1;
             ExecuteAsPlayer(p2, () =>
             {
-                p2.ShowTutorial("inventory", force: true);
-                inventoryGui.Show(null);
-                ZInput.ResetButtonStatus("Inventory");
-                ZInput.ResetButtonStatus("JoyButtonY");
+                try
+                {
+                    // Check P2 has a valid inventory before trying to show
+                    var inv = p2.GetInventory();
+                    if (inv == null)
+                    {
+                        SplitscreenLog.Err("Inventory", "P2 inventory is NULL! Cannot show.");
+                        _activeInventoryPlayerIndex = 0;
+                        return;
+                    }
+
+                    inventoryGui.Show(null, 1);
+                    ZInput.ResetButtonStatus("Inventory");
+                    ZInput.ResetButtonStatus("JoyButtonY");
+
+                    // Consume button-down state so our ZInput postfix patches
+                    // don't re-report the press to the original InventoryGui.Update
+                    p2Input.SelectButtonDown = false;
+                    p2Input.ButtonNorthDown = false;
+
+                    bool visible = IsInventoryVisible(inventoryGui);
+                    SplitscreenLog.Log("Inventory", $"P2 inventory Show() called, visible={visible}, m_inventoryRoot.active={inventoryGui.m_inventoryRoot?.gameObject.activeSelf}");
+                    if (!visible)
+                    {
+                        SplitscreenLog.Warn("Inventory", "P2 inventory NOT visible after Show()! Checking animator...");
+                        var anim = AnimatorFieldRef(inventoryGui);
+                        SplitscreenLog.Log("Inventory", $"  Animator: {(anim != null ? $"enabled={anim.enabled}, visible_param={anim.GetBool("visible")}" : "NULL")}");
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    SplitscreenLog.Err("Inventory", $"P2 inventory Show() EXCEPTION: {ex}");
+                    _activeInventoryPlayerIndex = 0;
+                }
             });
         }
 

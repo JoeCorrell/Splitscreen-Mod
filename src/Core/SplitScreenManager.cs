@@ -2,6 +2,7 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using ValheimSplitscreen.Camera;
+using ValheimSplitscreen.Config;
 using ValheimSplitscreen.HUD;
 using ValheimSplitscreen.Input;
 using ValheimSplitscreen.Player;
@@ -12,7 +13,8 @@ namespace ValheimSplitscreen.Core
     public enum SplitscreenState
     {
         Disabled,           // No splitscreen
-        PendingCharSelect,  // On main menu, P2 character select UI shown
+        PendingCharSelect,  // Legacy in-game character select overlay
+        MenuSplit,          // Main menu: screen physically split, P2 selecting character
         Armed,              // P2 character selected, waiting for world load
         Active              // In-game, splitscreen fully running
     }
@@ -30,6 +32,8 @@ namespace ValheimSplitscreen.Core
         public SplitPlayerManager PlayerManager { get; private set; }
         public SplitHudManager HudManager { get; private set; }
         public CharacterSelectUI CharacterSelect { get; private set; }
+        public MenuSplitController MenuSplit { get; private set; }
+        public Player2MenuOverlay P2Menu { get; private set; }
 
         /// <summary>Current splitscreen state.</summary>
         public SplitscreenState State { get; set; } = SplitscreenState.Disabled;
@@ -63,6 +67,8 @@ namespace ValheimSplitscreen.Core
             PlayerManager = gameObject.AddComponent<SplitPlayerManager>();
             HudManager = gameObject.AddComponent<SplitHudManager>();
             CharacterSelect = gameObject.AddComponent<CharacterSelectUI>();
+            MenuSplit = gameObject.AddComponent<MenuSplitController>();
+            P2Menu = gameObject.AddComponent<Player2MenuOverlay>();
             Debug.Log("[Splitscreen] SplitScreenManager.Awake - all subsystems created OK");
         }
 
@@ -90,26 +96,41 @@ namespace ValheimSplitscreen.Core
             switch (State)
             {
                 case SplitscreenState.Disabled:
-                    // Open P2 character select
-                    Debug.Log("[Splitscreen] Main menu: opening P2 character select");
-                    State = SplitscreenState.PendingCharSelect;
-                    CharacterSelect.IsMainMenuMode = true;
+                    // Split the screen and show P2 character select
+                    Debug.Log("[Splitscreen] Main menu: entering MenuSplit mode");
+                    State = SplitscreenState.MenuSplit;
+                    var config = SplitscreenPlugin.Instance.SplitConfig;
+                    bool horizontal = config.Orientation.Value == SplitOrientation.Horizontal;
+                    MenuSplit.Activate(horizontal);
+                    CharacterSelect.IsMenuSplitMode = true;
+                    CharacterSelect.IsMainMenuMode = false;
                     CharacterSelect.Show(
                         onSelected: (profile) =>
                         {
-                            Debug.Log($"[Splitscreen] P2 character selected on menu: {(profile != null ? profile.GetName() : "CREATE NEW")}");
+                            Debug.Log($"[Splitscreen] P2 character selected in MenuSplit: {(profile != null ? profile.GetName() : "CREATE NEW")}");
                             OnP2CharacterSelected(profile);
+                            MenuSplit.SetP2Ready(profile?.GetName() ?? "New Character");
                         },
                         onCancelled: () =>
                         {
-                            Debug.Log("[Splitscreen] P2 character selection cancelled on menu");
+                            Debug.Log("[Splitscreen] P2 character selection cancelled in MenuSplit");
+                            MenuSplit.Deactivate();
                             State = SplitscreenState.Disabled;
                         }
                     );
                     break;
 
+                case SplitscreenState.MenuSplit:
+                    // Cancel the menu split
+                    Debug.Log("[Splitscreen] Main menu: cancelling MenuSplit");
+                    CharacterSelect.Hide();
+                    MenuSplit.Deactivate();
+                    State = SplitscreenState.Disabled;
+                    PendingP2Profile = null;
+                    break;
+
                 case SplitscreenState.PendingCharSelect:
-                    // Cancel character selection
+                    // Legacy cancel
                     Debug.Log("[Splitscreen] Main menu: cancelling character select");
                     CharacterSelect.Hide();
                     State = SplitscreenState.Disabled;
@@ -119,6 +140,7 @@ namespace ValheimSplitscreen.Core
                 case SplitscreenState.Armed:
                     // Disarm — cancel the pending splitscreen
                     Debug.Log("[Splitscreen] Main menu: disarming splitscreen");
+                    MenuSplit.Deactivate();
                     State = SplitscreenState.Disabled;
                     PendingP2Profile = null;
                     break;
@@ -126,6 +148,7 @@ namespace ValheimSplitscreen.Core
                 case SplitscreenState.Active:
                     // Shouldn't be Active on main menu, but handle gracefully
                     Debug.LogWarning("[Splitscreen] State is Active on main menu — resetting to Disabled");
+                    MenuSplit.Deactivate();
                     State = SplitscreenState.Disabled;
                     PendingP2Profile = null;
                     break;
@@ -213,6 +236,13 @@ namespace ValheimSplitscreen.Core
             {
                 Debug.LogWarning("[Splitscreen] OnWorldLoaded: Game or Player not ready, ignoring");
                 return;
+            }
+
+            // Clean up menu split if still active
+            if (MenuSplit != null && MenuSplit.IsActive)
+            {
+                Debug.Log("[Splitscreen] OnWorldLoaded: deactivating MenuSplit before in-game activation");
+                MenuSplit.Deactivate();
             }
 
             Debug.Log($"[Splitscreen] OnWorldLoaded: auto-activating with P2 profile '{PendingP2Profile?.GetName()}'");
@@ -306,11 +336,26 @@ namespace ValheimSplitscreen.Core
             }
         }
 
+        /// <summary>
+        /// Public entry point for deactivation (used by P2 menu overlay).
+        /// </summary>
+        public void RequestDeactivate()
+        {
+            if (SplitscreenActive)
+            {
+                Debug.Log("[Splitscreen] RequestDeactivate called");
+                DeactivateSplitscreen();
+            }
+        }
+
         private void DeactivateSplitscreen()
         {
             if (!SplitscreenActive) return;
 
             Debug.Log("[Splitscreen] ========== DEACTIVATING SPLITSCREEN ==========");
+
+            Debug.Log("[Splitscreen]   Step 0: Hide P2 menu overlay");
+            if (P2Menu != null) P2Menu.Hide();
 
             Debug.Log("[Splitscreen]   Step 1: HudManager + RestoreHudAnchors");
             HudManager.OnSplitscreenDeactivated();
@@ -348,6 +393,7 @@ namespace ValheimSplitscreen.Core
             var savedProfile = PendingP2Profile ?? PlayerManager?.Player2Profile;
             Debug.Log($"[Splitscreen] DeactivateAndRearm: saving profile '{savedProfile?.GetName()}' for re-arm");
 
+            if (P2Menu != null) P2Menu.Hide();
             HudManager.OnSplitscreenDeactivated();
             Patches.HudPatches.RestoreHudAnchors();
             Patches.InventoryGuiPatches.RestoreInventoryCanvas();
@@ -359,13 +405,30 @@ namespace ValheimSplitscreen.Core
             PendingP2Profile = savedProfile;
             State = SplitscreenState.Armed;
             Debug.Log($"[Splitscreen] Re-armed with profile '{savedProfile?.GetName()}'");
+
+            // Re-show menu split when back on main menu
+            StartCoroutine(DelayedMenuSplitRestore());
+        }
+
+        private IEnumerator DelayedMenuSplitRestore()
+        {
+            yield return new WaitForSeconds(0.5f);
+            if (State == SplitscreenState.Armed && FejdStartup.instance != null && Game.instance == null)
+            {
+                var config = SplitscreenPlugin.Instance.SplitConfig;
+                bool horizontal = config.Orientation.Value == SplitOrientation.Horizontal;
+                MenuSplit.Activate(horizontal);
+                MenuSplit.SetP2Ready(PendingP2Profile?.GetName() ?? "New Character");
+                Debug.Log("[Splitscreen] Menu split restored after re-arm");
+            }
         }
 
         private void OnGUI()
         {
-            // Draw armed indicator on main menu
+            // Draw armed indicator on main menu (only when MenuSplit isn't handling the display)
             if (State != SplitscreenState.Armed) return;
             if (FejdStartup.instance == null || Game.instance != null) return;
+            if (MenuSplit != null && MenuSplit.IsActive) return;
 
             if (!_armedStylesInit)
             {

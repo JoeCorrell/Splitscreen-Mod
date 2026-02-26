@@ -36,8 +36,10 @@ namespace ValheimSplitscreen.Patches
             var mgr = SplitScreenManager.Instance;
             if (mgr == null) return;
 
-            // Only apply when splitscreen is armed or active
-            if (mgr.State != SplitscreenState.Armed && mgr.State != SplitscreenState.Active) return;
+            // Only apply when splitscreen is armed, in menu split, or active
+            if (mgr.State != SplitscreenState.MenuSplit &&
+                mgr.State != SplitscreenState.Armed &&
+                mgr.State != SplitscreenState.Active) return;
 
             // Check config
             var config = SplitscreenPlugin.Instance?.SplitConfig;

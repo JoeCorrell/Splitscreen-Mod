@@ -11,6 +11,7 @@ namespace ValheimSplitscreen.Input
     /// KeyboardMouse mode (default): Player 1 = Keyboard+Mouse, Player 2 = first gamepad (or IJKL fallback)
     /// Gamepad mode:                 Player 1 = Gamepad 0, Player 2 = Gamepad 1
     /// </summary>
+    [DefaultExecutionOrder(-100)]
     public class SplitInputManager : MonoBehaviour
     {
         public static SplitInputManager Instance { get; private set; }
