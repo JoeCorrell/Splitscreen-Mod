@@ -261,18 +261,15 @@ namespace ValheimSplitscreen.Player
                 bool inPieceSelection = Hud.IsPieceSelectionVisible();
                 bool inRadial = Hud.InRadial();
 
-                Vector3 moveDir = Vector3.zero;
-                if (ZInput.GetButton("Forward")) moveDir.z += 1f;
-                if (ZInput.GetButton("Backward")) moveDir.z -= 1f;
-                if (ZInput.GetButton("Left")) moveDir.x -= 1f;
-                if (ZInput.GetButton("Right")) moveDir.x += 1f;
-                moveDir.x += ZInput.GetJoyLeftStickX();
-                moveDir.z += 0f - ZInput.GetJoyLeftStickY();
+                Vector3 moveDir = new Vector3(
+                    input.GetJoyLeftStickX(),
+                    0f,
+                    0f - input.GetJoyLeftStickY());
                 if (moveDir.magnitude > 1f) moveDir.Normalize();
 
-                bool secondaryAttackHeld = (ZInput.GetButton("SecondaryAttack") || ZInput.GetButton("JoySecondaryAttack")) && !inInventoryEtc && !inRadial;
-                bool attackHeld = (ZInput.GetButton("Attack") || ZInput.GetButton("JoyAttack")) && !inInventoryEtc && !inRadial;
-                bool blockHeld = (ZInput.GetButton("Block") || ZInput.GetButton("JoyBlock")) && !inInventoryEtc && !inRadial;
+                bool secondaryAttackHeld = input.GetButton("SecondaryAttack") && !inInventoryEtc && !inRadial;
+                bool attackHeld = input.GetButton("Attack") && !inInventoryEtc && !inRadial;
+                bool blockHeld = input.GetButton("Block") && !inInventoryEtc && !inRadial;
 
                 bool attack = attackHeld && !_p2AttackWasPressed;
                 bool secondaryAttack = secondaryAttackHeld && !_p2SecondAttackWasPressed;
@@ -281,22 +278,22 @@ namespace ValheimSplitscreen.Player
                 _p2SecondAttackWasPressed = secondaryAttackHeld;
                 _p2BlockWasPressed = blockHeld;
 
-                bool jumpHeld = ZInput.GetButton("Jump");
-                bool jump = (jumpHeld && !_p2LastJump) || (ZInput.GetButtonDown("JoyJump") && !inPieceSelection && !inInventoryEtc && !inRadial);
+                bool jumpHeld = input.GetButton("Jump");
+                bool jump = (jumpHeld && !_p2LastJump) || (input.GetButtonDown("JoyJump") && !inPieceSelection && !inInventoryEtc && !inRadial);
                 _p2LastJump = jumpHeld;
 
-                bool crouchHeld = (ZInput.GetButton("Crouch") || ZInput.GetButtonPressedTimer("JoyCrouch") > 0.33f) && !InventoryGui.IsVisible() && !inRadial;
+                bool crouchHeld = (input.GetButton("Crouch") || input.GetButtonPressedTimer("JoyCrouch") > 0.33f) && !InventoryGui.IsVisible() && !inRadial;
                 bool crouch = crouchHeld && !_p2LastCrouch;
                 _p2LastCrouch = crouchHeld;
 
-                bool run = ZInput.GetButton("Run") || ZInput.GetButton("JoyRun");
-                bool autoRun = ZInput.GetButton("AutoRun");
-                bool dodge = ZInput.IsNonClassicFunctionality() && ZInput.IsGamepadActive() && ZInput.GetButtonDown("JoyDodge") && !inInventoryEtc && !inRadial;
+                bool run = input.GetButton("Run");
+                bool autoRun = input.GetButton("AutoRun");
+                bool dodge = ZInput.IsNonClassicFunctionality() && input.GetButtonDown("JoyDodge") && !inInventoryEtc && !inRadial;
 
                 if (Time.time - _lastControlsLogTime > 10f)
                 {
                     _lastControlsLogTime = Time.time;
-                    Debug.Log($"[Splitscreen][Player] P2 controls: move=({moveDir.x:F2},{moveDir.z:F2}), look=({ZInput.GetJoyRightStickX():F2},{ZInput.GetJoyRightStickY():F2}), atk={attack}, blk={block}, jmp={jump}, run={run}, dodge={dodge}");
+                    Debug.Log($"[Splitscreen][Player] P2 controls: move=({moveDir.x:F2},{moveDir.z:F2}), look=({input.GetJoyRightStickX():F2},{input.GetJoyRightStickY():F2}), atk={attack}, blk={block}, jmp={jump}, run={run}, dodge={dodge}");
                     Debug.Log($"[Splitscreen][Player] P2 state: alive={!Player2.IsDead()}, health={Player2.GetHealth():F0}/{Player2.GetMaxHealth():F0}, pos={Player2.transform.position}");
                 }
 
@@ -309,8 +306,8 @@ namespace ValheimSplitscreen.Player
                 if (!inInventoryEtc && !inRadial)
                 {
                     look = new Vector2(
-                        ZInput.GetJoyRightStickX() * 110f * Time.deltaTime * sens,
-                        (0f - ZInput.GetJoyRightStickY()) * 110f * Time.deltaTime * sens
+                        input.GetJoyRightStickX() * 110f * Time.deltaTime * sens,
+                        (0f - input.GetJoyRightStickY()) * 110f * Time.deltaTime * sens
                     );
                 }
                 Player2.SetMouseLook(look);

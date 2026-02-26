@@ -68,6 +68,39 @@ namespace ValheimSplitscreen.Patches
         }
 
         /// <summary>
+        /// Non-Joy action names that must be routed from the active player context,
+        /// otherwise Player 1 keyboard input can leak into Player 2 logic when
+        /// m_localPlayer is temporarily swapped.
+        /// </summary>
+        private static bool IsContextRoutedAction(string name)
+        {
+            switch (name)
+            {
+                case "Forward":
+                case "Backward":
+                case "Left":
+                case "Right":
+                case "Attack":
+                case "SecondaryAttack":
+                case "Block":
+                case "Jump":
+                case "Crouch":
+                case "Run":
+                case "AutoRun":
+                case "Use":
+                case "Inventory":
+                case "Menu":
+                case "MapZoomIn":
+                case "MapZoomOut":
+                case "Sit":
+                case "Hide":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
         /// Determines if a Joy-prefixed (gamepad) button read should be blocked.
         /// Blocks only in Player 1 context when P1 is keyboard+mouse.
         /// </summary>
@@ -105,7 +138,9 @@ namespace ValheimSplitscreen.Patches
                 return;
             }
 
-            if (IsJoyButton(name))
+            int context = GetContextPlayerIndex();
+            bool shouldRoute = IsJoyButton(name) || (context == 1 && IsContextRoutedAction(name));
+            if (shouldRoute)
             {
                 var state = GetContextInputState();
                 if (state != null)
@@ -130,13 +165,37 @@ namespace ValheimSplitscreen.Patches
                 return;
             }
 
-            if (IsJoyButton(name))
+            int context = GetContextPlayerIndex();
+            bool shouldRoute = IsJoyButton(name) || (context == 1 && IsContextRoutedAction(name));
+            if (shouldRoute)
             {
                 var state = GetContextInputState();
                 if (state != null)
                 {
                     __result = state.GetButtonDown(name);
                 }
+            }
+        }
+
+        [HarmonyPatch(typeof(ZInput), "GetButtonPressedTimer")]
+        [HarmonyPostfix]
+        public static void GetButtonPressedTimer_Postfix(string name, ref float __result)
+        {
+            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+            if (ShouldBlockJoyButton(name))
+            {
+                __result = 0f;
+                return;
+            }
+
+            int context = GetContextPlayerIndex();
+            bool shouldRoute = IsJoyButton(name) || (context == 1 && IsContextRoutedAction(name));
+            if (!shouldRoute) return;
+
+            var state = GetContextInputState();
+            if (state != null)
+            {
+                __result = state.GetButtonPressedTimer(name);
             }
         }
 
@@ -155,6 +214,14 @@ namespace ValheimSplitscreen.Patches
         public static void GetJoyLeftStickX_Postfix(ref float __result)
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+
+            int context = GetContextPlayerIndex();
+            var contextState = GetContextInputState();
+            if (context == 1 && contextState != null)
+            {
+                __result = contextState.GetJoyLeftStickX();
+                return;
+            }
 
             float original = __result;
             var gp = GetContextGamepad();
@@ -181,6 +248,14 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
+            int context = GetContextPlayerIndex();
+            var contextState = GetContextInputState();
+            if (context == 1 && contextState != null)
+            {
+                __result = contextState.GetJoyLeftStickY();
+                return;
+            }
+
             var gp = GetContextGamepad();
             if (gp != null)
             {
@@ -200,6 +275,14 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
+            int context = GetContextPlayerIndex();
+            var contextState = GetContextInputState();
+            if (context == 1 && contextState != null)
+            {
+                __result = contextState.GetJoyRightStickX();
+                return;
+            }
+
             var gp = GetContextGamepad();
             if (gp != null)
             {
@@ -217,6 +300,14 @@ namespace ValheimSplitscreen.Patches
         public static void GetJoyRightStickY_Postfix(ref float __result)
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+
+            int context = GetContextPlayerIndex();
+            var contextState = GetContextInputState();
+            if (context == 1 && contextState != null)
+            {
+                __result = contextState.GetJoyRightStickY();
+                return;
+            }
 
             var gp = GetContextGamepad();
             if (gp != null)
@@ -238,6 +329,15 @@ namespace ValheimSplitscreen.Patches
         public static void GetJoyLTrigger_Postfix(ref float __result)
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+
+            int context = GetContextPlayerIndex();
+            var contextState = GetContextInputState();
+            if (context == 1 && contextState != null)
+            {
+                __result = contextState.GetJoyLTrigger();
+                return;
+            }
+
             var gp = GetContextGamepad();
             __result = gp?.leftTrigger.ReadValue() ?? 0f;
         }
@@ -247,6 +347,15 @@ namespace ValheimSplitscreen.Patches
         public static void GetJoyRTrigger_Postfix(ref float __result)
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+
+            int context = GetContextPlayerIndex();
+            var contextState = GetContextInputState();
+            if (context == 1 && contextState != null)
+            {
+                __result = contextState.GetJoyRTrigger();
+                return;
+            }
+
             var gp = GetContextGamepad();
             __result = gp?.rightTrigger.ReadValue() ?? 0f;
         }

@@ -2,6 +2,7 @@ using HarmonyLib;
 using UnityEngine;
 using ValheimSplitscreen.Camera;
 using ValheimSplitscreen.Core;
+using ValheimSplitscreen.Player;
 
 namespace ValheimSplitscreen.Patches
 {
@@ -122,6 +123,54 @@ namespace ValheimSplitscreen.Patches
                 Debug.LogWarning($"[Splitscreen][HUD] Cannot restore: canvas={canvas != null}, hasSavedState={_hasSavedState}");
             }
             _hasSavedState = false;
+        }
+    }
+
+    /// <summary>
+    /// Swaps Player.m_localPlayer to P2 when the P2 clone's HotkeyBar runs its Update().
+    /// This lets the full Update chain (data refresh + UpdateIcons) operate on P2's inventory.
+    /// Also re-layers newly created icon GameObjects to Player2HudLayer.
+    /// </summary>
+    [HarmonyPatch]
+    public static class HotkeyBarPatches
+    {
+        private static bool _swapped;
+        private static global::Player _savedLocal;
+
+        [HarmonyPatch(typeof(HotkeyBar), "Update")]
+        [HarmonyPrefix]
+        public static void Update_Prefix(HotkeyBar __instance)
+        {
+            _swapped = false;
+            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+            if (__instance.gameObject.layer != SplitCameraManager.Player2HudLayer) return;
+
+            var p2 = SplitScreenManager.Instance.PlayerManager?.Player2;
+            if (p2 == null) return;
+
+            _savedLocal = global::Player.m_localPlayer;
+            global::Player.m_localPlayer = p2;
+            _swapped = true;
+        }
+
+        [HarmonyPatch(typeof(HotkeyBar), "Update")]
+        [HarmonyPostfix]
+        public static void Update_Postfix(HotkeyBar __instance)
+        {
+            if (_swapped)
+            {
+                global::Player.m_localPlayer = _savedLocal;
+                _savedLocal = null;
+                _swapped = false;
+            }
+
+            // Re-layer any newly created icon children to P2's HUD layer
+            if (__instance.gameObject.layer == SplitCameraManager.Player2HudLayer)
+            {
+                var transforms = __instance.GetComponentsInChildren<Transform>(true);
+                for (int i = 0; i < transforms.Length; i++)
+                    transforms[i].gameObject.layer = SplitCameraManager.Player2HudLayer;
+            }
         }
     }
 }

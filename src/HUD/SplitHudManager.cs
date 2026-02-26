@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
-using HarmonyLib;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -201,7 +199,8 @@ namespace ValheimSplitscreen.HUD
                 || script is Graphic
                 || script is Mask
                 || script is RectMask2D
-                || script is TMP_Text;
+                || script is TMP_Text
+                || script is HotkeyBar;
         }
 
         private static void SetLayerRecursively(GameObject root, int layer)
@@ -251,8 +250,6 @@ namespace ValheimSplitscreen.HUD
         private Minimap _cloneMinimap;
 
         private HotkeyBar[] _hotkeyBars = Array.Empty<HotkeyBar>();
-        private readonly object[] _hotbarInvokeArgs = new object[1];
-        private static readonly MethodInfo HotkeyBarUpdateIconsMethod = AccessTools.Method(typeof(HotkeyBar), "UpdateIcons");
 
         private bool _initialized;
         private bool _staticPanelsConfigured;
@@ -587,22 +584,101 @@ namespace ValheimSplitscreen.HUD
             }
 
             _mirrorMinimapRoot.SetActive(true);
+
+            var p2 = SplitScreenManager.Instance?.PlayerManager?.Player2;
+            var minimap = Minimap.instance;
+
+            // Copy map texture and material from P1's minimap
             if (_mirrorMapImageSmall != null && _sourceMapImageSmall != null)
             {
-                _mirrorMapImageSmall.uvRect = _sourceMapImageSmall.uvRect;
                 _mirrorMapImageSmall.texture = _sourceMapImageSmall.texture;
                 if (_sourceMapImageSmall.material != null)
                 {
                     _mirrorMapImageSmall.material = _sourceMapImageSmall.material;
                 }
+
+                // Center the minimap on P2's position instead of P1's
+                if (p2 != null && minimap != null)
+                {
+                    float texSize = minimap.m_textureSize;
+                    float pixSize = minimap.m_pixelSize;
+                    float half = texSize / 2f;
+
+                    float uvX = (p2.transform.position.x / pixSize + half) / texSize;
+                    float uvY = (p2.transform.position.z / pixSize + half) / texSize;
+
+                    // Use same zoom as P1's minimap
+                    float zoom = _sourceMapImageSmall.uvRect.width;
+                    _mirrorMapImageSmall.uvRect = new Rect(uvX - zoom / 2f, uvY - zoom / 2f, zoom, zoom);
+                }
+                else
+                {
+                    // Fallback: copy P1's uvRect
+                    _mirrorMapImageSmall.uvRect = _sourceMapImageSmall.uvRect;
+                }
             }
 
-            CopyMarker(_sourceSmallMarker, _mirrorSmallMarker);
-            CopyMarker(_sourceShipMarker, _mirrorShipMarker);
-
-            if (_sourceBiomeNameSmall != null && _mirrorBiomeNameSmall != null)
+            // Player marker: center on minimap, rotate to P2's facing
+            if (_mirrorSmallMarker != null)
             {
-                _mirrorBiomeNameSmall.text = _sourceBiomeNameSmall.text;
+                _mirrorSmallMarker.anchoredPosition = Vector2.zero;
+                var cam = SplitCameraManager.Instance?.Player2Camera;
+                if (cam != null)
+                {
+                    float angle = -cam.transform.rotation.eulerAngles.y;
+                    _mirrorSmallMarker.localRotation = Quaternion.Euler(0, 0, angle);
+                }
+            }
+
+            // Ship marker: position relative to P2's map center
+            if (_mirrorShipMarker != null)
+            {
+                Ship controlledShip = p2 != null ? p2.GetControlledShip() : null;
+                if (controlledShip != null && minimap != null && _mirrorMapImageSmall != null)
+                {
+                    _mirrorShipMarker.gameObject.SetActive(true);
+                    float texSize = minimap.m_textureSize;
+                    float pixSize = minimap.m_pixelSize;
+                    float half = texSize / 2f;
+
+                    // Ship and P2 positions in UV space
+                    Vector3 shipPos = controlledShip.transform.position;
+                    float shipUvX = (shipPos.x / pixSize + half) / texSize;
+                    float shipUvY = (shipPos.z / pixSize + half) / texSize;
+                    float p2UvX = (p2.transform.position.x / pixSize + half) / texSize;
+                    float p2UvY = (p2.transform.position.z / pixSize + half) / texSize;
+
+                    // Offset in UV space, then convert to minimap UI coordinates
+                    float zoom = _mirrorMapImageSmall.uvRect.width;
+                    RectTransform mapRT = _mirrorMapImageSmall.rectTransform;
+                    float mapWidth = mapRT.rect.width;
+                    float mapHeight = mapRT.rect.height;
+
+                    float relX = (shipUvX - p2UvX) / zoom * mapWidth;
+                    float relY = (shipUvY - p2UvY) / zoom * mapHeight;
+                    _mirrorShipMarker.anchoredPosition = new Vector2(relX, relY);
+
+                    float shipAngle = -controlledShip.transform.rotation.eulerAngles.y;
+                    _mirrorShipMarker.localRotation = Quaternion.Euler(0, 0, shipAngle);
+                }
+                else
+                {
+                    _mirrorShipMarker.gameObject.SetActive(false);
+                }
+            }
+
+            // Biome name based on P2's position
+            if (_mirrorBiomeNameSmall != null)
+            {
+                if (p2 != null)
+                {
+                    Heightmap.Biome biome = Heightmap.FindBiome(p2.transform.position);
+                    _mirrorBiomeNameSmall.text = Localization.instance.Localize("$biome_" + biome.ToString().ToLower());
+                }
+                else if (_sourceBiomeNameSmall != null)
+                {
+                    _mirrorBiomeNameSmall.text = _sourceBiomeNameSmall.text;
+                }
             }
         }
 
@@ -616,6 +692,14 @@ namespace ValheimSplitscreen.HUD
             target.anchoredPosition = source.anchoredPosition;
             target.localRotation = source.localRotation;
             target.localScale = source.localScale;
+        }
+
+        private static void SetLayerRecursive(GameObject root, int layer)
+        {
+            if (root == null) return;
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < transforms.Length; i++)
+                transforms[i].gameObject.layer = layer;
         }
 
         private void ConfigureMinimapVisibility()
@@ -656,30 +740,13 @@ namespace ValheimSplitscreen.HUD
 
         private void UpdateHotbar(global::Player p2)
         {
-            if (HotkeyBarUpdateIconsMethod == null) return;
-
+            // HotkeyBar.Update() now runs naturally via Harmony patch (HotkeyBarPatches)
+            // which swaps Player.m_localPlayer to P2 for bars on Player2HudLayer.
+            // We just need to find bars for HideUnsupportedBranches and periodic re-search.
             if ((_hotkeyBars == null || _hotkeyBars.Length == 0) && Time.time - _lastHotbarSearchTime > 2f)
             {
                 _lastHotbarSearchTime = Time.time;
                 FindHotkeyBars();
-            }
-
-            if (_hotkeyBars == null || _hotkeyBars.Length == 0) return;
-
-            _hotbarInvokeArgs[0] = p2;
-            for (int i = 0; i < _hotkeyBars.Length; i++)
-            {
-                var hotkeyBar = _hotkeyBars[i];
-                if (hotkeyBar == null) continue;
-
-                try
-                {
-                    HotkeyBarUpdateIconsMethod.Invoke(hotkeyBar, _hotbarInvokeArgs);
-                }
-                catch
-                {
-                    // Keep HUD update robust even if one HotkeyBar signature changes.
-                }
             }
         }
 
