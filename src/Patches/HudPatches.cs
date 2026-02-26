@@ -1,7 +1,6 @@
 using HarmonyLib;
 using UnityEngine;
 using ValheimSplitscreen.Camera;
-using ValheimSplitscreen.Config;
 using ValheimSplitscreen.Core;
 
 namespace ValheimSplitscreen.Patches
@@ -45,7 +44,7 @@ namespace ValheimSplitscreen.Patches
                 return;
             }
 
-            var p1Camera = SplitCameraManager.Instance.OriginalCamera;
+            var p1Camera = SplitCameraManager.Instance.Player1UiCamera;
             if (p1Camera == null)
             {
                 if (Time.time - _lastHudLogTime > 5f)

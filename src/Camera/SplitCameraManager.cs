@@ -1,3 +1,5 @@
+using System;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.Rendering;
 using ValheimSplitscreen.Config;
@@ -14,6 +16,8 @@ namespace ValheimSplitscreen.Camera
     /// </summary>
     public class SplitCameraManager : MonoBehaviour
     {
+        public const int Player2HudLayer = 31;
+
         public static SplitCameraManager Instance { get; private set; }
 
         // Per-player RenderTextures with their own depth buffers
@@ -24,6 +28,12 @@ namespace ValheimSplitscreen.Camera
         private GameObject _p2CameraObj;
         private UnityEngine.Camera _p2Camera;
         private UnityEngine.Camera _p2SkyCamera;
+
+        // UI-only cameras (render HUD without world post-processing)
+        private GameObject _p1UiCameraObj;
+        private UnityEngine.Camera _p1UiCamera;
+        private GameObject _p2UiCameraObj;
+        private UnityEngine.Camera _p2UiCamera;
 
         // Compositor camera that blits RTs to screen
         private GameObject _compositorObj;
@@ -45,12 +55,17 @@ namespace ValheimSplitscreen.Camera
         private DepthTextureMode _savedDepthTextureMode;
         private DepthTextureMode _savedSkyDepthTextureMode;
         private RenderTexture _savedTargetTexture;
+        private int _savedMainCullingMask;
+        private int _savedSkyCullingMask = -1;
+        private int _uiLayerMask;
 
         // Logging rate limiter
         private float _lastCamLogTime;
 
         public UnityEngine.Camera Player2Camera => _p2Camera;
         public UnityEngine.Camera OriginalCamera => _originalCamera;
+        public UnityEngine.Camera Player1UiCamera => _p1UiCamera != null ? _p1UiCamera : _originalCamera;
+        public UnityEngine.Camera Player2UiCamera => _p2UiCamera != null ? _p2UiCamera : _p2Camera;
         public RenderTexture P1RenderTexture => _p1RT;
         public RenderTexture P2RenderTexture => _p2RT;
 
@@ -81,6 +96,17 @@ namespace ValheimSplitscreen.Camera
             _originalViewport = _originalCamera.rect;
             _savedTargetTexture = _originalCamera.targetTexture;
             _savedDepthTextureMode = _originalCamera.depthTextureMode;
+            _savedMainCullingMask = _originalCamera.cullingMask;
+            _uiLayerMask = LayerMask.GetMask("UI", "GUI");
+            if (_uiLayerMask == 0)
+            {
+                // Fallback to Unity's default UI layer index.
+                _uiLayerMask = 1 << 5;
+            }
+            if (Hud.instance?.m_rootObject != null)
+            {
+                _uiLayerMask |= 1 << Hud.instance.m_rootObject.layer;
+            }
 
             Debug.Log($"[Splitscreen][Camera] Original camera state:");
             Debug.Log($"[Splitscreen][Camera]   name={_originalCamera.gameObject.name}");
@@ -113,10 +139,20 @@ namespace ValheimSplitscreen.Camera
             CreatePlayer2Camera();
             Debug.Log($"[Splitscreen][Camera] Step C DONE: _p2Camera={_p2Camera != null}, _p2SkyCamera={_p2SkyCamera != null}");
 
-            // Step D: Create compositor camera
-            Debug.Log("[Splitscreen][Camera] Step D: Creating compositor...");
+            // Step C2: Copy post-processing components to P2 camera (for AO, bloom, etc.)
+            Debug.Log("[Splitscreen][Camera] Step C2: Copying post-processing to P2...");
+            CopyPostProcessingToP2();
+            Debug.Log("[Splitscreen][Camera] Step C2 DONE");
+
+            // Step D: Create UI-only cameras for HUD rendering
+            Debug.Log("[Splitscreen][Camera] Step D: Creating UI cameras...");
+            CreateUICameras();
+            Debug.Log($"[Splitscreen][Camera] Step D DONE: _p1UiCamera={_p1UiCamera != null}, _p2UiCamera={_p2UiCamera != null}");
+
+            // Step E: Create compositor camera
+            Debug.Log("[Splitscreen][Camera] Step E: Creating compositor...");
             CreateCompositor(horizontal);
-            Debug.Log($"[Splitscreen][Camera] Step D DONE: _compositor={_compositor != null}");
+            Debug.Log($"[Splitscreen][Camera] Step E DONE: _compositor={_compositor != null}");
 
             // Summary
             Debug.Log("[Splitscreen][Camera] === CAMERA SETUP SUMMARY ===");
@@ -124,57 +160,86 @@ namespace ValheimSplitscreen.Camera
             var skyCam = GameCamera.instance.m_skyCamera;
             if (skyCam != null)
                 Debug.Log($"[Splitscreen][Camera]   P1 sky:  targetRT={skyCam.targetTexture?.name}, depth={skyCam.depth}, rect={skyCam.rect}");
+            Debug.Log($"[Splitscreen][Camera]   P1 UI:   targetRT={_p1UiCamera?.targetTexture?.name}, depth={_p1UiCamera?.depth}, cullMask={_p1UiCamera?.cullingMask}");
             Debug.Log($"[Splitscreen][Camera]   P2 main: targetRT={_p2Camera?.targetTexture?.name}, depth={_p2Camera?.depth}, rect={_p2Camera?.rect}");
             Debug.Log($"[Splitscreen][Camera]   P2 sky:  targetRT={_p2SkyCamera?.targetTexture?.name}, depth={_p2SkyCamera?.depth}, rect={_p2SkyCamera?.rect}");
+            Debug.Log($"[Splitscreen][Camera]   P2 UI:   targetRT={_p2UiCamera?.targetTexture?.name}, depth={_p2UiCamera?.depth}, cullMask={_p2UiCamera?.cullingMask}");
             Debug.Log($"[Splitscreen][Camera]   Compositor: depth={_compositorCamera?.depth}, targetRT={(_compositorCamera?.targetTexture != null ? _compositorCamera.targetTexture.name : "SCREEN")}");
             Debug.Log("[Splitscreen][Camera] === OnSplitscreenActivated END ===");
         }
 
         private void CreateRenderTextures(bool horizontal)
         {
-            int rtWidth, rtHeight;
+            int p1Width;
+            int p1Height;
+            int p2Width;
+            int p2Height;
+
             if (horizontal)
             {
-                rtWidth = Screen.width;
-                rtHeight = Screen.height / 2;
+                p1Width = Screen.width;
+                p2Width = Screen.width;
+                p1Height = Screen.height / 2;
+                p2Height = Screen.height - p1Height;
             }
             else
             {
-                rtWidth = Screen.width / 2;
-                rtHeight = Screen.height;
+                p1Width = Screen.width / 2;
+                p2Width = Screen.width - p1Width;
+                p1Height = Screen.height;
+                p2Height = Screen.height;
             }
+
+            p1Width = Mathf.Max(1, p1Width);
+            p1Height = Mathf.Max(1, p1Height);
+            p2Width = Mathf.Max(1, p2Width);
+            p2Height = Mathf.Max(1, p2Height);
 
             int aa = QualitySettings.antiAliasing;
             if (aa < 1) aa = 1;
 
-            Debug.Log($"[Splitscreen][Camera] Creating RT P1: {rtWidth}x{rtHeight}, depth=24, AA={aa}, format=Default");
-            _p1RT = new RenderTexture(rtWidth, rtHeight, 24, RenderTextureFormat.Default);
-            _p1RT.antiAliasing = aa;
+            Debug.Log($"[Splitscreen][Camera] Creating RT P1: {p1Width}x{p1Height}, depth=24, AA={aa}, format=Default");
+            _p1RT = new RenderTexture(p1Width, p1Height, 24, RenderTextureFormat.Default);
             _p1RT.name = "SplitscreenRT_P1";
+            ConfigureRenderTexture(_p1RT, aa);
             _p1RT.Create();
             Debug.Log($"[Splitscreen][Camera] P1 RT created: IsCreated={_p1RT.IsCreated()}, width={_p1RT.width}, height={_p1RT.height}");
 
-            Debug.Log($"[Splitscreen][Camera] Creating RT P2: {rtWidth}x{rtHeight}, depth=24, AA={aa}, format=Default");
-            _p2RT = new RenderTexture(rtWidth, rtHeight, 24, RenderTextureFormat.Default);
-            _p2RT.antiAliasing = aa;
+            Debug.Log($"[Splitscreen][Camera] Creating RT P2: {p2Width}x{p2Height}, depth=24, AA={aa}, format=Default");
+            _p2RT = new RenderTexture(p2Width, p2Height, 24, RenderTextureFormat.Default);
             _p2RT.name = "SplitscreenRT_P2";
+            ConfigureRenderTexture(_p2RT, aa);
             _p2RT.Create();
             Debug.Log($"[Splitscreen][Camera] P2 RT created: IsCreated={_p2RT.IsCreated()}, width={_p2RT.width}, height={_p2RT.height}");
         }
 
+        private static void ConfigureRenderTexture(RenderTexture rt, int aa)
+        {
+            rt.antiAliasing = aa;
+            rt.filterMode = FilterMode.Bilinear;
+            rt.wrapMode = TextureWrapMode.Clamp;
+            rt.useMipMap = false;
+            rt.autoGenerateMips = false;
+        }
+
         private void SetupPlayer1Cameras()
         {
+            int excludedUiMask = _uiLayerMask | (1 << Player2HudLayer);
+
             Debug.Log($"[Splitscreen][Camera] Setting P1 main camera targetTexture to {_p1RT.name}");
             _originalCamera.targetTexture = _p1RT;
             _originalCamera.rect = new Rect(0f, 0f, 1f, 1f);
+            _originalCamera.cullingMask &= ~excludedUiMask;
             Debug.Log($"[Splitscreen][Camera] P1 main camera SET: targetTexture={_originalCamera.targetTexture?.name}, rect={_originalCamera.rect}, depthTexMode={_originalCamera.depthTextureMode}");
 
             if (GameCamera.instance.m_skyCamera != null)
             {
                 _savedSkyDepthTextureMode = GameCamera.instance.m_skyCamera.depthTextureMode;
+                _savedSkyCullingMask = GameCamera.instance.m_skyCamera.cullingMask;
                 Debug.Log($"[Splitscreen][Camera] P1 sky camera BEFORE: targetTexture={GameCamera.instance.m_skyCamera.targetTexture?.name}, rect={GameCamera.instance.m_skyCamera.rect}, depth={GameCamera.instance.m_skyCamera.depth}");
                 GameCamera.instance.m_skyCamera.targetTexture = _p1RT;
                 GameCamera.instance.m_skyCamera.rect = new Rect(0f, 0f, 1f, 1f);
+                GameCamera.instance.m_skyCamera.cullingMask &= ~excludedUiMask;
                 Debug.Log($"[Splitscreen][Camera] P1 sky camera SET: targetTexture={GameCamera.instance.m_skyCamera.targetTexture?.name}, rect={GameCamera.instance.m_skyCamera.rect}");
             }
             else
@@ -194,6 +259,7 @@ namespace ValheimSplitscreen.Camera
             _p2Camera.CopyFrom(_originalCamera);
             _p2Camera.targetTexture = _p2RT;
             _p2Camera.rect = new Rect(0f, 0f, 1f, 1f);
+            _p2Camera.cullingMask &= ~(_uiLayerMask | (1 << Player2HudLayer));
 
             var config = SplitscreenPlugin.Instance.SplitConfig;
             _p2Camera.fieldOfView = config.CameraFOV.Value;
@@ -224,6 +290,7 @@ namespace ValheimSplitscreen.Camera
             _p2SkyCamera.targetTexture = _p2RT;
             _p2SkyCamera.rect = new Rect(0f, 0f, 1f, 1f);
             _p2SkyCamera.depth = _originalCamera.depth + 9;
+            _p2SkyCamera.cullingMask &= ~(_uiLayerMask | (1 << Player2HudLayer));
 
             Debug.Log($"[Splitscreen][Camera] P2 sky camera created:");
             Debug.Log($"[Splitscreen][Camera]   targetTexture={_p2SkyCamera.targetTexture?.name}");
@@ -235,6 +302,149 @@ namespace ValheimSplitscreen.Camera
             var mainListener = GameCamera.instance?.GetComponentInChildren<AudioListener>();
             Debug.Log($"[Splitscreen][Camera] Audio listener on P1: {mainListener != null && mainListener.enabled}");
             if (mainListener != null) mainListener.enabled = true;
+        }
+
+        private void CreateUICameras()
+        {
+            if (_originalCamera == null || _p2Camera == null)
+            {
+                Debug.LogWarning("[Splitscreen][Camera] Cannot create UI cameras, base cameras are missing");
+                return;
+            }
+
+            _p1UiCameraObj = new GameObject("SplitscreenUICamera_P1");
+            _p1UiCameraObj.transform.SetParent(_originalCamera.transform, false);
+            _p1UiCamera = _p1UiCameraObj.AddComponent<UnityEngine.Camera>();
+            SetupUiCamera(_p1UiCamera, _originalCamera, _p1RT, _originalCamera.depth + 50f, _uiLayerMask);
+
+            _p2UiCameraObj = new GameObject("SplitscreenUICamera_P2");
+            _p2UiCameraObj.transform.SetParent(_p2Camera.transform, false);
+            _p2UiCamera = _p2UiCameraObj.AddComponent<UnityEngine.Camera>();
+            SetupUiCamera(_p2UiCamera, _p2Camera, _p2RT, _p2Camera.depth + 50f, 1 << Player2HudLayer);
+
+            Debug.Log($"[Splitscreen][Camera] UI cameras created: P1={_p1UiCamera.name}, P2={_p2UiCamera.name}, uiMask={_uiLayerMask}");
+        }
+
+        private void SetupUiCamera(UnityEngine.Camera uiCamera, UnityEngine.Camera sourceCamera, RenderTexture target, float depth, int cullingMask)
+        {
+            uiCamera.CopyFrom(sourceCamera);
+            uiCamera.targetTexture = target;
+            uiCamera.rect = new Rect(0f, 0f, 1f, 1f);
+            uiCamera.depth = depth;
+            uiCamera.clearFlags = CameraClearFlags.Depth;
+            uiCamera.backgroundColor = Color.clear;
+            uiCamera.cullingMask = cullingMask;
+            uiCamera.allowMSAA = false;
+            uiCamera.allowHDR = false;
+            uiCamera.useOcclusionCulling = false;
+        }
+
+        private void CopyPostProcessingToP2()
+        {
+            var p1Components = GameCamera.instance.GetComponents<Component>();
+            Debug.Log($"[Splitscreen][Camera] P1 camera has {p1Components.Length} components:");
+            foreach (var comp in p1Components)
+            {
+                if (comp == null) continue;
+                Debug.Log($"[Splitscreen][Camera]   {comp.GetType().FullName} (enabled={IsEnabled(comp)})");
+            }
+
+            _p2Camera.depthTextureMode = _originalCamera.depthTextureMode;
+            Debug.Log($"[Splitscreen][Camera] P2 depthTextureMode set to {_p2Camera.depthTextureMode}");
+
+            foreach (var comp in p1Components)
+            {
+                if (comp == null) continue;
+
+                Type type = comp.GetType();
+                string typeName = type.Name;
+                string fullName = type.FullName ?? "";
+
+                if (comp is UnityEngine.Camera || comp is AudioListener || comp is Transform)
+                    continue;
+                if (fullName.Contains("assembly_valheim") || typeName == "GameCamera")
+                    continue;
+
+                bool shouldCopy = typeName.Contains("PostProcess") ||
+                                  typeName.Contains("SSAO") ||
+                                  typeName.Contains("AmbientOcclusion") ||
+                                  typeName.Contains("Volume") ||
+                                  fullName.Contains("PostProcessing") ||
+                                  fullName.Contains("Rendering.PostProcessing") ||
+                                  fullName.Contains("Rendering.Universal");
+
+                if (!shouldCopy) continue;
+
+                if (_p2CameraObj.GetComponent(type) != null)
+                {
+                    Debug.Log($"[Splitscreen][Camera] P2 already has {typeName}, skipping");
+                    continue;
+                }
+
+                try
+                {
+                    var newComp = _p2CameraObj.AddComponent(type);
+                    if (newComp != null)
+                    {
+                        CopyComponentFields(comp, newComp, type);
+                        Debug.Log($"[Splitscreen][Camera] Copied {typeName} to P2 camera");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[Splitscreen][Camera] Failed to copy {typeName}: {e.Message}");
+                }
+            }
+        }
+
+        private void CopyComponentFields(Component source, Component dest, Type type)
+        {
+            var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance);
+            foreach (var field in fields)
+            {
+                try
+                {
+                    if (typeof(Delegate).IsAssignableFrom(field.FieldType)) continue;
+                    field.SetValue(dest, field.GetValue(source));
+                }
+                catch { }
+            }
+
+            var privateFields = type.GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
+            foreach (var field in privateFields)
+            {
+                if (field.GetCustomAttribute<SerializeField>() == null) continue;
+                try
+                {
+                    if (typeof(Delegate).IsAssignableFrom(field.FieldType)) continue;
+                    field.SetValue(dest, field.GetValue(source));
+                }
+                catch { }
+            }
+
+            if (type.Name == "PostProcessLayer")
+            {
+                try
+                {
+                    var triggerField = type.GetField("volumeTrigger", BindingFlags.Public | BindingFlags.Instance);
+                    if (triggerField != null)
+                    {
+                        triggerField.SetValue(dest, _p2CameraObj.transform);
+                        Debug.Log("[Splitscreen][Camera] Set PostProcessLayer.volumeTrigger to P2 camera transform");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[Splitscreen][Camera] Failed to set volumeTrigger: {e.Message}");
+                }
+            }
+        }
+
+        private bool IsEnabled(Component comp)
+        {
+            if (comp is Behaviour b) return b.enabled;
+            if (comp is Renderer r) return r.enabled;
+            return true;
         }
 
         private void CreateCompositor(bool horizontal)
@@ -269,6 +479,7 @@ namespace ValheimSplitscreen.Camera
                 _originalCamera.targetTexture = _savedTargetTexture;
                 _originalCamera.rect = new Rect(0f, 0f, 1f, 1f);
                 _originalCamera.depthTextureMode = _savedDepthTextureMode;
+                _originalCamera.cullingMask = _savedMainCullingMask;
                 Debug.Log($"[Splitscreen][Camera] P1 main restored: targetTexture={(_originalCamera.targetTexture != null ? _originalCamera.targetTexture.name : "null")}, rect={_originalCamera.rect}");
 
                 if (GameCamera.instance != null && GameCamera.instance.m_skyCamera != null)
@@ -277,12 +488,30 @@ namespace ValheimSplitscreen.Camera
                     GameCamera.instance.m_skyCamera.targetTexture = null;
                     GameCamera.instance.m_skyCamera.rect = new Rect(0f, 0f, 1f, 1f);
                     GameCamera.instance.m_skyCamera.depthTextureMode = _savedSkyDepthTextureMode;
+                    if (_savedSkyCullingMask >= 0)
+                    {
+                        GameCamera.instance.m_skyCamera.cullingMask = _savedSkyCullingMask;
+                    }
                     Debug.Log("[Splitscreen][Camera] P1 sky restored");
                 }
             }
             else
             {
                 Debug.LogWarning("[Splitscreen][Camera] _originalCamera is null during deactivation!");
+            }
+
+            // Destroy UI cameras
+            if (_p1UiCameraObj != null)
+            {
+                Destroy(_p1UiCameraObj);
+                _p1UiCameraObj = null;
+                _p1UiCamera = null;
+            }
+            if (_p2UiCameraObj != null)
+            {
+                Destroy(_p2UiCameraObj);
+                _p2UiCameraObj = null;
+                _p2UiCamera = null;
             }
 
             // Destroy compositor
@@ -363,8 +592,10 @@ namespace ValheimSplitscreen.Camera
                 Debug.Log($"[Splitscreen][Camera] P1 main: enabled={_originalCamera?.enabled}, targetRT={_originalCamera?.targetTexture?.name}, rect={_originalCamera?.rect}");
                 var skyCam = GameCamera.instance?.m_skyCamera;
                 Debug.Log($"[Splitscreen][Camera] P1 sky:  enabled={skyCam?.enabled}, targetRT={skyCam?.targetTexture?.name}");
+                Debug.Log($"[Splitscreen][Camera] P1 UI:   enabled={_p1UiCamera?.enabled}, targetRT={_p1UiCamera?.targetTexture?.name}");
                 Debug.Log($"[Splitscreen][Camera] P2 main: enabled={_p2Camera?.enabled}, targetRT={_p2Camera?.targetTexture?.name}, rect={_p2Camera?.rect}");
                 Debug.Log($"[Splitscreen][Camera] P2 sky:  enabled={_p2SkyCamera?.enabled}, targetRT={_p2SkyCamera?.targetTexture?.name}");
+                Debug.Log($"[Splitscreen][Camera] P2 UI:   enabled={_p2UiCamera?.enabled}, targetRT={_p2UiCamera?.targetTexture?.name}");
                 Debug.Log($"[Splitscreen][Camera] Compositor: enabled={_compositorCamera?.enabled}, targetRT={(_compositorCamera?.targetTexture != null ? _compositorCamera.targetTexture.name : "SCREEN")}");
                 Debug.Log($"[Splitscreen][Camera] P1 RT: isCreated={_p1RT?.IsCreated()}, P2 RT: isCreated={_p2RT?.IsCreated()}");
                 Debug.Log($"[Splitscreen][Camera] P2 cam pos={_p2CameraObj.transform.position}, P2 player pos={p2.transform.position}, dist={_p2Distance}");
@@ -570,19 +801,21 @@ namespace ValheimSplitscreen.Camera
 
             if (_horizontal)
             {
-                float halfH = Screen.height / 2f;
+                int p1Height = Mathf.Clamp(_p1RT.height, 1, Screen.height);
+                int p2Height = Mathf.Max(1, Screen.height - p1Height);
                 // P1 = top half
-                GUI.DrawTexture(new Rect(0, 0, Screen.width, halfH), _p1RT, ScaleMode.StretchToFill);
+                GUI.DrawTexture(new Rect(0, 0, Screen.width, p1Height), _p1RT, ScaleMode.StretchToFill, alphaBlend: false);
                 // P2 = bottom half
-                GUI.DrawTexture(new Rect(0, halfH, Screen.width, halfH), _p2RT, ScaleMode.StretchToFill);
+                GUI.DrawTexture(new Rect(0, p1Height, Screen.width, p2Height), _p2RT, ScaleMode.StretchToFill, alphaBlend: false);
             }
             else
             {
-                float halfW = Screen.width / 2f;
+                int p1Width = Mathf.Clamp(_p1RT.width, 1, Screen.width);
+                int p2Width = Mathf.Max(1, Screen.width - p1Width);
                 // P1 = left half
-                GUI.DrawTexture(new Rect(0, 0, halfW, Screen.height), _p1RT, ScaleMode.StretchToFill);
+                GUI.DrawTexture(new Rect(0, 0, p1Width, Screen.height), _p1RT, ScaleMode.StretchToFill, alphaBlend: false);
                 // P2 = right half
-                GUI.DrawTexture(new Rect(halfW, 0, halfW, Screen.height), _p2RT, ScaleMode.StretchToFill);
+                GUI.DrawTexture(new Rect(p1Width, 0, p2Width, Screen.height), _p2RT, ScaleMode.StretchToFill, alphaBlend: false);
             }
 
             // Draw divider line
@@ -595,12 +828,12 @@ namespace ValheimSplitscreen.Camera
 
             if (_horizontal)
             {
-                float y = Screen.height / 2f;
+                int y = Mathf.Clamp(_p1RT.height, 1, Screen.height - 1);
                 GUI.DrawTexture(new Rect(0, y - 1, Screen.width, 3), _dividerTex);
             }
             else
             {
-                float x = Screen.width / 2f;
+                int x = Mathf.Clamp(_p1RT.width, 1, Screen.width - 1);
                 GUI.DrawTexture(new Rect(x - 1, 0, 3, Screen.height), _dividerTex);
             }
         }

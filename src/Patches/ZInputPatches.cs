@@ -29,48 +29,56 @@ namespace ValheimSplitscreen.Patches
         private static string _lastBlockedButton;
 
         /// <summary>
-        /// Get the gamepad that Player 1 should use, or null if Player 1 is on keyboard.
+        /// Get the player index currently executing input code.
+        /// Uses the temporary m_localPlayer swap done for Player 2 in PlayerPatches.
         /// </summary>
-        private static Gamepad GetPlayer1Gamepad()
+        private static int GetContextPlayerIndex()
+        {
+            var playerMgr = SplitScreenManager.Instance?.PlayerManager;
+            if (playerMgr?.Player2 != null && global::Player.m_localPlayer == playerMgr.Player2)
+            {
+                return 1;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Get the gamepad assigned to the player context currently being processed.
+        /// </summary>
+        private static Gamepad GetContextGamepad()
         {
             var inputMgr = SplitInputManager.Instance;
             if (inputMgr == null) return null;
+            return inputMgr.GetGamepad(GetContextPlayerIndex());
+        }
 
-            // If Player 1 uses keyboard (< 2 gamepads), they have NO gamepad
-            if (inputMgr.Player1UsesKeyboard) return null;
+        /// <summary>
+        /// Get the per-player input snapshot for the currently executing context.
+        /// </summary>
+        private static PlayerInputState GetContextInputState()
+        {
+            var inputMgr = SplitInputManager.Instance;
+            if (inputMgr == null) return null;
+            return inputMgr.GetInputState(GetContextPlayerIndex());
+        }
 
-            // With 2+ gamepads, Player 1 uses Gamepad 0
-            if (Gamepad.all.Count > 0) return Gamepad.all[0];
-            return null;
+        private static bool IsJoyButton(string name)
+        {
+            return !string.IsNullOrEmpty(name) && name.StartsWith("Joy", StringComparison.Ordinal);
         }
 
         /// <summary>
         /// Determines if a Joy-prefixed (gamepad) button read should be blocked.
-        /// Blocks when Player 1 is on keyboard UNLESS we're currently executing
-        /// Player 2's Update/FixedUpdate (detected by m_localPlayer being swapped to P2).
+        /// Blocks only in Player 1 context when P1 is keyboard+mouse.
         /// </summary>
         private static bool ShouldBlockJoyButton(string name)
         {
-            if (string.IsNullOrEmpty(name)) return false;
-            if (!name.StartsWith("Joy", StringComparison.Ordinal)) return false;
+            if (!IsJoyButton(name)) return false;
 
             var inputMgr = SplitInputManager.Instance;
             if (inputMgr == null) return false;
 
-            // When Player 1 is on keyboard, block gamepad button reads in P1's context
-            if (inputMgr.Player1UsesKeyboard)
-            {
-                // Allow through if we're in Player 2's update context
-                // (m_localPlayer is temporarily swapped to P2 during their Update/FixedUpdate)
-                var mgr = SplitScreenManager.Instance?.PlayerManager;
-                if (mgr?.Player2 != null && global::Player.m_localPlayer == mgr.Player2)
-                {
-                    return false; // P2's code is running, let Joy buttons through
-                }
-                return true; // P1's context, block gamepad buttons
-            }
-
-            return false;
+            return inputMgr.Player1UsesKeyboard && GetContextPlayerIndex() == 0;
         }
 
         // ──────────────── Button patches ────────────────
@@ -94,6 +102,16 @@ namespace ValheimSplitscreen.Patches
                     }
                 }
                 __result = false;
+                return;
+            }
+
+            if (IsJoyButton(name))
+            {
+                var state = GetContextInputState();
+                if (state != null)
+                {
+                    __result = state.GetButton(name);
+                }
             }
         }
 
@@ -109,6 +127,16 @@ namespace ValheimSplitscreen.Patches
                     Debug.Log($"[Splitscreen][ZInput] BLOCKED GetButtonDown('{name}')=true->false in P1 context");
                 }
                 __result = false;
+                return;
+            }
+
+            if (IsJoyButton(name))
+            {
+                var state = GetContextInputState();
+                if (state != null)
+                {
+                    __result = state.GetButtonDown(name);
+                }
             }
         }
 
@@ -129,7 +157,7 @@ namespace ValheimSplitscreen.Patches
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
             float original = __result;
-            var gp = GetPlayer1Gamepad();
+            var gp = GetContextGamepad();
             if (gp != null)
             {
                 float val = gp.leftStick.x.ReadValue();
@@ -153,12 +181,12 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            var gp = GetPlayer1Gamepad();
+            var gp = GetContextGamepad();
             if (gp != null)
             {
                 float val = gp.leftStick.y.ReadValue();
-                // Pass through raw value - vanilla ZInput already applies any needed transformations
-                __result = Mathf.Abs(val) > 0.15f ? val : 0f;
+                // Vanilla ZInput returns inverted Y for sticks.
+                __result = Mathf.Abs(val) > 0.15f ? -val : 0f;
             }
             else
             {
@@ -172,7 +200,7 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            var gp = GetPlayer1Gamepad();
+            var gp = GetContextGamepad();
             if (gp != null)
             {
                 float val = gp.rightStick.x.ReadValue();
@@ -190,12 +218,12 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            var gp = GetPlayer1Gamepad();
+            var gp = GetContextGamepad();
             if (gp != null)
             {
                 float val = gp.rightStick.y.ReadValue();
-                // Pass through raw value - vanilla ZInput already applies any needed transformations
-                __result = Mathf.Abs(val) > 0.1f ? val : 0f;
+                // Vanilla ZInput returns inverted Y for sticks.
+                __result = Mathf.Abs(val) > 0.1f ? -val : 0f;
             }
             else
             {
@@ -210,7 +238,7 @@ namespace ValheimSplitscreen.Patches
         public static void GetJoyLTrigger_Postfix(ref float __result)
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
-            var gp = GetPlayer1Gamepad();
+            var gp = GetContextGamepad();
             __result = gp?.leftTrigger.ReadValue() ?? 0f;
         }
 
@@ -219,7 +247,7 @@ namespace ValheimSplitscreen.Patches
         public static void GetJoyRTrigger_Postfix(ref float __result)
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
-            var gp = GetPlayer1Gamepad();
+            var gp = GetContextGamepad();
             __result = gp?.rightTrigger.ReadValue() ?? 0f;
         }
 
@@ -237,19 +265,23 @@ namespace ValheimSplitscreen.Patches
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
             bool original = __result;
-            if (SplitInputManager.Instance != null && SplitInputManager.Instance.Player1UsesKeyboard)
+            var inputMgr = SplitInputManager.Instance;
+            if (inputMgr == null) return;
+
+            int context = GetContextPlayerIndex();
+            if (context == 0)
             {
-                __result = false;
+                __result = !inputMgr.Player1UsesKeyboard;
             }
             else
             {
-                __result = true;
+                __result = inputMgr.GetGamepad(1) != null;
             }
 
             if (Time.time - _lastModeLogTime > 15f)
             {
                 _lastModeLogTime = Time.time;
-                Debug.Log($"[Splitscreen][ZInput] IsGamepadActive: original={original} -> {__result}, P1Keyboard={SplitInputManager.Instance?.Player1UsesKeyboard}, gamepads={Gamepad.all.Count}");
+                Debug.Log($"[Splitscreen][ZInput] IsGamepadActive: original={original} -> {__result}, context=P{context + 1}, P1Keyboard={inputMgr.Player1UsesKeyboard}, gamepads={Gamepad.all.Count}");
             }
         }
 
@@ -262,9 +294,12 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            if (SplitInputManager.Instance != null && SplitInputManager.Instance.Player1UsesKeyboard)
+            var inputMgr = SplitInputManager.Instance;
+            if (inputMgr == null) return;
+
+            // Mouse is only for Player 1 in keyboard mode.
+            if (GetContextPlayerIndex() == 0 && inputMgr.Player1UsesKeyboard)
             {
-                // Player 1 uses mouse - keep it active
                 return;
             }
 
@@ -281,7 +316,10 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            if (SplitInputManager.Instance != null && SplitInputManager.Instance.Player1UsesKeyboard)
+            var inputMgr = SplitInputManager.Instance;
+            if (inputMgr == null) return;
+
+            if (GetContextPlayerIndex() == 0 && inputMgr.Player1UsesKeyboard)
             {
                 return; // Let mouse delta through for Player 1
             }
@@ -298,7 +336,10 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            if (SplitInputManager.Instance != null && SplitInputManager.Instance.Player1UsesKeyboard)
+            var inputMgr = SplitInputManager.Instance;
+            if (inputMgr == null) return;
+
+            if (GetContextPlayerIndex() == 0 && inputMgr.Player1UsesKeyboard)
             {
                 return; // Let scroll through for Player 1
             }

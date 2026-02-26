@@ -57,6 +57,11 @@ namespace ValheimSplitscreen.Player
         // Rate-limit logging for per-frame updates
         private float _lastControlsLogTime;
         private float _lastP2AliveCheckTime;
+        private bool _p2AttackWasPressed;
+        private bool _p2SecondAttackWasPressed;
+        private bool _p2BlockWasPressed;
+        private bool _p2LastJump;
+        private bool _p2LastCrouch;
 
         /// <summary>
         /// Spawn the second player character.
@@ -242,49 +247,82 @@ namespace ValheimSplitscreen.Player
             if (input == null) return;
 
             IsUpdatingPlayer2 = true;
-
-            // Build movement vector from Player 2's gamepad
-            Vector3 moveDir = Vector3.zero;
-            moveDir.x = input.MoveAxis.x;
-            moveDir.z = -input.MoveAxis.y; // Valheim inverts Y on left stick
-
-            if (moveDir.magnitude > 1f)
-                moveDir.Normalize();
-
-            // Map buttons to Valheim actions
-            bool attack = input.RightShoulderDown;
-            bool attackHold = input.RightShoulder;
-            bool secondaryAttack = input.RightTrigger > 0.4f;
-            bool secondaryAttackHold = secondaryAttack;
-            bool block = input.LeftShoulderDown;
-            bool blockHold = input.LeftShoulder;
-            bool jump = input.ButtonSouthDown;
-            bool crouch = input.RightStickPressDown;
-            bool run = input.LeftStickPress;
-            bool autoRun = false;
-            bool dodge = input.ButtonEastDown;
-
-            // Rate-limited logging of P2 controls
-            if (Time.time - _lastControlsLogTime > 10f)
+            var previousLocal = global::Player.m_localPlayer;
+            bool swappedLocal = previousLocal != Player2;
+            if (swappedLocal)
             {
-                _lastControlsLogTime = Time.time;
-                Debug.Log($"[Splitscreen][Player] P2 controls: move=({moveDir.x:F2},{moveDir.z:F2}), look=({input.LookAxis.x:F2},{input.LookAxis.y:F2}), atk={attack}, blk={block}, jmp={jump}, run={run}, dodge={dodge}");
-                Debug.Log($"[Splitscreen][Player] P2 state: alive={!Player2.IsDead()}, health={Player2.GetHealth():F0}/{Player2.GetMaxHealth():F0}, pos={Player2.transform.position}");
+                global::Player.m_localPlayer = Player2;
             }
 
-            Player2.SetControls(moveDir, attack, attackHold, secondaryAttack, secondaryAttackHold,
-                block, blockHold, jump, crouch, run, autoRun, dodge);
+            try
+            {
+                // Mirror PlayerController input rules so P2 obeys current Valheim gamepad layout.
+                bool inInventoryEtc = InventoryGui.IsVisible() || Minimap.IsOpen() || StoreGui.IsVisible();
+                bool inPieceSelection = Hud.IsPieceSelectionVisible();
+                bool inRadial = Hud.InRadial();
 
-            // Camera look for Player 2
-            var config = SplitscreenPlugin.Instance.SplitConfig;
-            float sens = config.GamepadSensitivity.Value;
-            Vector2 look = new Vector2(
-                input.LookAxis.x * 110f * Time.deltaTime * sens,
-                -input.LookAxis.y * 110f * Time.deltaTime * sens
-            );
-            Player2.SetMouseLook(look);
+                Vector3 moveDir = Vector3.zero;
+                if (ZInput.GetButton("Forward")) moveDir.z += 1f;
+                if (ZInput.GetButton("Backward")) moveDir.z -= 1f;
+                if (ZInput.GetButton("Left")) moveDir.x -= 1f;
+                if (ZInput.GetButton("Right")) moveDir.x += 1f;
+                moveDir.x += ZInput.GetJoyLeftStickX();
+                moveDir.z += 0f - ZInput.GetJoyLeftStickY();
+                if (moveDir.magnitude > 1f) moveDir.Normalize();
 
-            IsUpdatingPlayer2 = false;
+                bool secondaryAttackHeld = (ZInput.GetButton("SecondaryAttack") || ZInput.GetButton("JoySecondaryAttack")) && !inInventoryEtc && !inRadial;
+                bool attackHeld = (ZInput.GetButton("Attack") || ZInput.GetButton("JoyAttack")) && !inInventoryEtc && !inRadial;
+                bool blockHeld = (ZInput.GetButton("Block") || ZInput.GetButton("JoyBlock")) && !inInventoryEtc && !inRadial;
+
+                bool attack = attackHeld && !_p2AttackWasPressed;
+                bool secondaryAttack = secondaryAttackHeld && !_p2SecondAttackWasPressed;
+                bool block = blockHeld && !_p2BlockWasPressed;
+                _p2AttackWasPressed = attackHeld;
+                _p2SecondAttackWasPressed = secondaryAttackHeld;
+                _p2BlockWasPressed = blockHeld;
+
+                bool jumpHeld = ZInput.GetButton("Jump");
+                bool jump = (jumpHeld && !_p2LastJump) || (ZInput.GetButtonDown("JoyJump") && !inPieceSelection && !inInventoryEtc && !inRadial);
+                _p2LastJump = jumpHeld;
+
+                bool crouchHeld = (ZInput.GetButton("Crouch") || ZInput.GetButtonPressedTimer("JoyCrouch") > 0.33f) && !InventoryGui.IsVisible() && !inRadial;
+                bool crouch = crouchHeld && !_p2LastCrouch;
+                _p2LastCrouch = crouchHeld;
+
+                bool run = ZInput.GetButton("Run") || ZInput.GetButton("JoyRun");
+                bool autoRun = ZInput.GetButton("AutoRun");
+                bool dodge = ZInput.IsNonClassicFunctionality() && ZInput.IsGamepadActive() && ZInput.GetButtonDown("JoyDodge") && !inInventoryEtc && !inRadial;
+
+                if (Time.time - _lastControlsLogTime > 10f)
+                {
+                    _lastControlsLogTime = Time.time;
+                    Debug.Log($"[Splitscreen][Player] P2 controls: move=({moveDir.x:F2},{moveDir.z:F2}), look=({ZInput.GetJoyRightStickX():F2},{ZInput.GetJoyRightStickY():F2}), atk={attack}, blk={block}, jmp={jump}, run={run}, dodge={dodge}");
+                    Debug.Log($"[Splitscreen][Player] P2 state: alive={!Player2.IsDead()}, health={Player2.GetHealth():F0}/{Player2.GetMaxHealth():F0}, pos={Player2.transform.position}");
+                }
+
+                Player2.SetControls(moveDir, attack, attackHeld, secondaryAttack, secondaryAttackHeld,
+                    block, blockHeld, jump, crouch, run, autoRun, dodge);
+
+                var config = SplitscreenPlugin.Instance.SplitConfig;
+                float sens = config.GamepadSensitivity.Value;
+                Vector2 look = Vector2.zero;
+                if (!inInventoryEtc && !inRadial)
+                {
+                    look = new Vector2(
+                        ZInput.GetJoyRightStickX() * 110f * Time.deltaTime * sens,
+                        (0f - ZInput.GetJoyRightStickY()) * 110f * Time.deltaTime * sens
+                    );
+                }
+                Player2.SetMouseLook(look);
+            }
+            finally
+            {
+                if (swappedLocal)
+                {
+                    global::Player.m_localPlayer = previousLocal;
+                }
+                IsUpdatingPlayer2 = false;
+            }
         }
 
         /// <summary>

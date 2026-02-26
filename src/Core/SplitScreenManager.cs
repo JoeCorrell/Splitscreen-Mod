@@ -195,6 +195,7 @@ namespace ValheimSplitscreen.Core
             Debug.Log("[Splitscreen]   Step 1: HudManager + RestoreHudAnchors");
             HudManager.OnSplitscreenDeactivated();
             Patches.HudPatches.RestoreHudAnchors();
+            Patches.InventoryGuiPatches.RestoreInventoryCanvas();
 
             Debug.Log("[Splitscreen]   Step 2: PlayerManager.DespawnSecondPlayer");
             PlayerManager.DespawnSecondPlayer();

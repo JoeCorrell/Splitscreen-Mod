@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Valheim.SettingsGui;
 
 namespace ValheimSplitscreen.Input
 {
@@ -46,6 +47,8 @@ namespace ValheimSplitscreen.Input
         public bool ButtonEastDown;
         public bool LeftShoulderDown;
         public bool RightShoulderDown;
+        public bool LeftTriggerDown;
+        public bool RightTriggerDown;
         public bool DpadUpDown;
         public bool DpadDownDown;
         public bool DpadLeftDown;
@@ -100,6 +103,8 @@ namespace ValheimSplitscreen.Input
             ButtonEastDown = ButtonEast && !_prevEast;
             LeftShoulderDown = LeftShoulder && !_prevLB;
             RightShoulderDown = RightShoulder && !_prevRB;
+            LeftTriggerDown = LeftTrigger > 0.4f && !_prevLT;
+            RightTriggerDown = RightTrigger > 0.4f && !_prevRT;
             DpadUpDown = DpadUp && !_prevUp;
             DpadDownDown = DpadDown && !_prevDown;
             DpadLeftDown = DpadLeft && !_prevLeft;
@@ -141,6 +146,7 @@ namespace ValheimSplitscreen.Input
             StartButton = SelectButton = false;
             ButtonSouthDown = ButtonWestDown = ButtonNorthDown = ButtonEastDown = false;
             LeftShoulderDown = RightShoulderDown = false;
+            LeftTriggerDown = RightTriggerDown = false;
             DpadUpDown = DpadDownDown = DpadLeftDown = DpadRightDown = false;
             LeftStickPressDown = RightStickPressDown = false;
             StartButtonDown = SelectButtonDown = false;
@@ -169,16 +175,16 @@ namespace ValheimSplitscreen.Input
 
             // Movement: IJKL
             MoveAxis = Vector2.zero;
-            if (kb.iKey.isPressed) MoveAxis.y = -1f;  // forward (Valheim Y is inverted for sticks)
-            if (kb.kKey.isPressed) MoveAxis.y = 1f;   // backward
+            if (kb.iKey.isPressed) MoveAxis.y = 1f;   // forward
+            if (kb.kKey.isPressed) MoveAxis.y = -1f;  // backward
             if (kb.jKey.isPressed) MoveAxis.x = -1f;
             if (kb.lKey.isPressed) MoveAxis.x = 1f;
             if (MoveAxis.magnitude > 1f) MoveAxis.Normalize();
 
             // Look: Numpad arrows
             LookAxis = Vector2.zero;
-            if (kb.numpad8Key.isPressed) LookAxis.y = -0.7f;
-            if (kb.numpad2Key.isPressed) LookAxis.y = 0.7f;
+            if (kb.numpad8Key.isPressed) LookAxis.y = 0.7f;
+            if (kb.numpad2Key.isPressed) LookAxis.y = -0.7f;
             if (kb.numpad4Key.isPressed) LookAxis.x = -0.7f;
             if (kb.numpad6Key.isPressed) LookAxis.x = 0.7f;
 
@@ -209,6 +215,8 @@ namespace ValheimSplitscreen.Input
             ButtonEastDown = ButtonEast && !_prevEast;
             LeftShoulderDown = LeftShoulder && !_prevLB;
             RightShoulderDown = RightShoulder && !_prevRB;
+            LeftTriggerDown = LeftTrigger > 0.4f && !_prevLT;
+            RightTriggerDown = RightTrigger > 0.4f && !_prevRT;
             DpadUpDown = DpadUp && !_prevUp;
             DpadDownDown = DpadDown && !_prevDown;
             DpadLeftDown = DpadLeft && !_prevLeft;
@@ -241,30 +249,58 @@ namespace ValheimSplitscreen.Input
         /// Maps a Valheim ZInput button name to this player's gamepad state.
         /// Returns whether the button is currently held.
         /// </summary>
+        private static bool IsClassicLayout => ZInput.InputLayout == InputLayout.Default;
+        private static bool IsAlt1Layout => ZInput.InputLayout == InputLayout.Alternative1;
+
+        private bool GetAltKeysHold()
+        {
+            // Default/Alt2: LT, Alt1: LB
+            return IsAlt1Layout ? LeftShoulder : LeftTrigger > 0.4f;
+        }
+
+        private bool GetAttackHold() => IsAlt1Layout ? RightShoulder : RightTrigger > 0.4f;
+        private bool GetAttackDown() => IsAlt1Layout ? RightShoulderDown : RightTriggerDown;
+        private bool GetSecondaryAttackHold() => IsAlt1Layout ? RightTrigger > 0.4f : RightShoulder;
+        private bool GetSecondaryAttackDown() => IsAlt1Layout ? RightTriggerDown : RightShoulderDown;
+        private bool GetBlockHold() => IsAlt1Layout ? LeftShoulder : LeftTrigger > 0.4f;
+        private bool GetBlockDown() => IsAlt1Layout ? LeftShoulderDown : LeftTriggerDown;
+        private bool GetUseHold() => IsClassicLayout ? ButtonSouth : ButtonWest;
+        private bool GetUseDown() => IsClassicLayout ? ButtonSouthDown : ButtonWestDown;
+        private bool GetBuildMenuHold() => IsClassicLayout ? ButtonSouth : ButtonEast;
+        private bool GetBuildMenuDown() => IsClassicLayout ? ButtonSouthDown : ButtonEastDown;
+        private bool GetRunHold() => IsClassicLayout ? LeftShoulder : LeftStickPress;
+        private bool GetRunDown() => IsClassicLayout ? LeftShoulderDown : LeftStickPressDown;
+        private bool GetCrouchHold() => IsClassicLayout ? LeftStickPress : RightStickPress;
+        private bool GetCrouchDown() => IsClassicLayout ? LeftStickPressDown : RightStickPressDown;
+        private bool GetHideHold() => IsClassicLayout ? RightStickPress : (IsAlt1Layout ? LeftTrigger > 0.4f : LeftShoulder);
+        private bool GetHideDown() => IsClassicLayout ? RightStickPressDown : (IsAlt1Layout ? LeftTriggerDown : LeftShoulderDown);
+        private bool GetSitHold() => IsClassicLayout ? ButtonWest : DpadDown;
+        private bool GetSitDown() => IsClassicLayout ? ButtonWestDown : DpadDownDown;
+
         public bool GetButton(string name)
         {
             switch (name)
             {
                 case "JoyAttack":
                 case "Attack":
-                    return RightShoulder;
+                    return GetAttackHold();
                 case "JoySecondaryAttack":
                 case "SecondaryAttack":
-                    return RightTrigger > 0.4f;
+                    return GetSecondaryAttackHold();
                 case "JoyBlock":
                 case "Block":
-                    return LeftShoulder;
+                    return GetBlockHold();
                 case "JoyJump":
                 case "Jump":
                     return ButtonSouth;
                 case "JoyCrouch":
                 case "Crouch":
-                    return RightStickPress;
+                    return GetCrouchHold();
                 case "JoyRun":
                 case "Run":
-                    return LeftStickPress;
+                    return GetRunHold();
                 case "JoyDodge":
-                    return ButtonEast;
+                    return ButtonEast && GetAltKeysHold();
                 case "Forward":
                     return MoveAxis.y > 0.3f;
                 case "Backward":
@@ -274,15 +310,15 @@ namespace ValheimSplitscreen.Input
                 case "Right":
                     return MoveAxis.x > 0.3f;
                 case "JoyAltKeys":
-                    return ButtonNorth;
+                    return GetAltKeysHold();
                 case "JoyCamZoomIn":
                     return DpadUp;
                 case "JoyCamZoomOut":
                     return DpadDown;
                 case "JoyTabLeft":
-                    return DpadLeft;
+                    return LeftShoulder;
                 case "JoyTabRight":
-                    return DpadRight;
+                    return RightShoulder;
                 case "JoyButtonY":
                     return ButtonNorth;
                 case "JoyButtonX":
@@ -297,22 +333,44 @@ namespace ValheimSplitscreen.Input
                     return RightStickPress;
                 case "JoyRotate":
                     return LeftTrigger > 0.4f;
+                case "JoyRotateRight":
+                    return RightTrigger > 0.4f;
+                case "JoyPlace":
+                    return GetAttackHold();
+                case "JoyRemove":
+                    return GetSecondaryAttackHold();
+                case "JoyBuildMenu":
+                    return GetBuildMenuHold();
                 case "AutoRun":
                     return false;
                 case "Inventory":
                     return SelectButton;
+                case "JoyInventory":
+                    return ButtonNorth;
                 case "JoyMenu":
+                case "JoyStart":
                 case "Menu":
                     return StartButton;
+                case "JoyBack":
+                case "JoyMap":
+                case "JoyChat":
+                    return SelectButton;
                 case "JoyUse":
                 case "Use":
-                    return ButtonWest;
+                    return GetUseHold();
                 case "JoyHide":
-                    return DpadRight;
+                    return GetHideHold();
                 case "JoySit":
-                    return DpadDown;
+                    return GetSitHold();
                 case "JoyGPower":
-                    return ButtonNorth && LeftShoulder;
+                case "JoyGP":
+                    return DpadDown;
+                case "JoyHotbarLeft":
+                    return DpadLeft;
+                case "JoyHotbarRight":
+                    return DpadRight;
+                case "JoyHotbarUse":
+                    return DpadUp;
                 default:
                     return false;
             }
@@ -327,34 +385,34 @@ namespace ValheimSplitscreen.Input
             {
                 case "JoyAttack":
                 case "Attack":
-                    return RightShoulderDown;
+                    return GetAttackDown();
                 case "JoySecondaryAttack":
                 case "SecondaryAttack":
-                    return RightTrigger > 0.4f && !_prevRT;
+                    return GetSecondaryAttackDown();
                 case "JoyBlock":
                 case "Block":
-                    return LeftShoulderDown;
+                    return GetBlockDown();
                 case "JoyJump":
                 case "Jump":
                     return ButtonSouthDown;
                 case "JoyCrouch":
                 case "Crouch":
-                    return RightStickPressDown;
+                    return GetCrouchDown();
                 case "JoyRun":
                 case "Run":
-                    return LeftStickPressDown;
+                    return GetRunDown();
                 case "JoyDodge":
-                    return ButtonEastDown;
+                    return ButtonEastDown && GetAltKeysHold();
                 case "JoyAltKeys":
-                    return ButtonNorthDown;
+                    return IsAlt1Layout ? LeftShoulderDown : LeftTriggerDown;
                 case "JoyCamZoomIn":
                     return DpadUpDown;
                 case "JoyCamZoomOut":
                     return DpadDownDown;
                 case "JoyTabLeft":
-                    return DpadLeftDown;
+                    return LeftShoulderDown;
                 case "JoyTabRight":
-                    return DpadRightDown;
+                    return RightShoulderDown;
                 case "JoyButtonY":
                     return ButtonNorthDown;
                 case "JoyButtonX":
@@ -369,12 +427,31 @@ namespace ValheimSplitscreen.Input
                     return RightStickPressDown;
                 case "Inventory":
                     return SelectButtonDown;
+                case "JoyInventory":
+                    return ButtonNorthDown;
                 case "JoyMenu":
+                case "JoyStart":
                 case "Menu":
                     return StartButtonDown;
+                case "JoyBack":
+                case "JoyMap":
+                case "JoyChat":
+                    return SelectButtonDown;
                 case "JoyUse":
                 case "Use":
-                    return ButtonWestDown;
+                    return GetUseDown();
+                case "JoyBuildMenu":
+                    return GetBuildMenuDown();
+                case "JoyHide":
+                    return GetHideDown();
+                case "JoySit":
+                    return GetSitDown();
+                case "JoyHotbarLeft":
+                    return DpadLeftDown;
+                case "JoyHotbarRight":
+                    return DpadRightDown;
+                case "JoyHotbarUse":
+                    return DpadUpDown;
                 default:
                     return false;
             }

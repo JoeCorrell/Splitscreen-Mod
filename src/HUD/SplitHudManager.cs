@@ -1,8 +1,10 @@
-using System.Collections.Generic;
+using System;
+using System.Reflection;
+using HarmonyLib;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using ValheimSplitscreen.Camera;
-using ValheimSplitscreen.Config;
 using ValheimSplitscreen.Core;
 
 namespace ValheimSplitscreen.HUD
@@ -57,13 +59,13 @@ namespace ValheimSplitscreen.HUD
             }
             Debug.Log($"[Splitscreen][P2HUD] Hud.instance found, m_rootObject={Hud.instance.m_rootObject?.name}");
 
-            var p2Camera = SplitCameraManager.Instance?.Player2Camera;
+            var p2Camera = SplitCameraManager.Instance?.Player2UiCamera;
             if (p2Camera == null)
             {
-                Debug.LogWarning("[Splitscreen][P2HUD] P2 camera not available yet!");
+                Debug.LogWarning("[Splitscreen][P2HUD] P2 UI camera not available yet!");
                 return;
             }
-            Debug.Log($"[Splitscreen][P2HUD] P2 camera available: {p2Camera.name}, targetTexture={p2Camera.targetTexture?.name}");
+            Debug.Log($"[Splitscreen][P2HUD] P2 UI camera available: {p2Camera.name}, targetTexture={p2Camera.targetTexture?.name}");
 
             // Find the root canvas of the vanilla HUD
             var sourceCanvas = Hud.instance.m_rootObject?.GetComponentInParent<Canvas>();
@@ -79,6 +81,7 @@ namespace ValheimSplitscreen.HUD
             Debug.Log("[Splitscreen][P2HUD] Instantiating clone...");
             _p2HudClone = Instantiate(sourceCanvas.gameObject);
             _p2HudClone.name = "SplitscreenHUD_P2";
+            SetLayerRecursively(_p2HudClone, SplitCameraManager.Player2HudLayer);
             Debug.Log($"[Splitscreen][P2HUD] Clone created: '{_p2HudClone.name}', childCount={_p2HudClone.transform.childCount}");
 
             // Disable ALL MonoBehaviours on the clone to prevent singleton conflicts
@@ -87,8 +90,7 @@ namespace ValheimSplitscreen.HUD
             int skippedCount = 0;
             foreach (var script in scripts)
             {
-                if (script is CanvasScaler || script is GraphicRaycaster ||
-                    script is LayoutGroup || script is ContentSizeFitter)
+                if (ShouldKeepScriptEnabled(script))
                 {
                     skippedCount++;
                     continue;
@@ -96,7 +98,7 @@ namespace ValheimSplitscreen.HUD
                 script.enabled = false;
                 disabledCount++;
             }
-            Debug.Log($"[Splitscreen][P2HUD] Disabled {disabledCount} scripts, kept {skippedCount} layout/scaler scripts");
+            Debug.Log($"[Splitscreen][P2HUD] Disabled {disabledCount} scripts, kept {skippedCount} render/layout scripts");
 
             // Set up the clone's canvas
             _p2Canvas = _p2HudClone.GetComponent<Canvas>();
@@ -114,10 +116,6 @@ namespace ValheimSplitscreen.HUD
                 Debug.LogError("[Splitscreen][P2HUD] Clone has no Canvas component!");
             }
 
-            // Disable minimap on clone
-            Debug.Log("[Splitscreen][P2HUD] Disabling minimap on clone...");
-            DisableMinimapOnClone();
-
             // Add updater
             Debug.Log("[Splitscreen][P2HUD] Adding Player2HudUpdater...");
             _p2Updater = _p2HudClone.AddComponent<Player2HudUpdater>();
@@ -125,21 +123,26 @@ namespace ValheimSplitscreen.HUD
             Debug.Log("[Splitscreen][P2HUD] === CreatePlayer2Hud END (SUCCESS) ===");
         }
 
-        private void DisableMinimapOnClone()
+        private static void SetLayerRecursively(GameObject root, int layer)
         {
-            var transforms = _p2HudClone.GetComponentsInChildren<Transform>(true);
-            int disabledMinimap = 0;
-            foreach (var t in transforms)
+            if (root == null) return;
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < transforms.Length; i++)
             {
-                string name = t.gameObject.name.ToLowerInvariant();
-                if (name.Contains("minimap") || name.Contains("MiniMap"))
-                {
-                    t.gameObject.SetActive(false);
-                    disabledMinimap++;
-                    Debug.Log($"[Splitscreen][P2HUD] Disabled minimap element: '{t.gameObject.name}'");
-                }
+                transforms[i].gameObject.layer = layer;
             }
-            Debug.Log($"[Splitscreen][P2HUD] Disabled {disabledMinimap} minimap elements");
+        }
+
+        private static bool ShouldKeepScriptEnabled(MonoBehaviour script)
+        {
+            return script is CanvasScaler
+                || script is GraphicRaycaster
+                || script is LayoutGroup
+                || script is ContentSizeFitter
+                || script is Graphic
+                || script is Mask
+                || script is RectMask2D
+                || script is TMP_Text;
         }
 
         private void DestroyPlayer2Hud()
@@ -179,16 +182,24 @@ namespace ValheimSplitscreen.HUD
         private Image _eitrBarFill;
         private Image _eitrBarSlow;
         private Transform _hotbarRoot;
+        private HotkeyBar[] _hotkeyBars = Array.Empty<HotkeyBar>();
+        private readonly object[] _hotbarInvokeArgs = new object[1];
+        private static readonly MethodInfo HotkeyBarUpdateIconsMethod = AccessTools.Method(typeof(HotkeyBar), "UpdateIcons");
 
         private bool _initialized;
         private float _lastLogTime;
         private float _lastSearchTime;
+        private float _lastHotbarSearchTime;
         private float _lastUpdateLogTime;
         private int _updateCount;
 
         private void Awake()
         {
             Debug.Log("[Splitscreen][P2HUD] Player2HudUpdater.Awake");
+            if (HotkeyBarUpdateIconsMethod == null)
+            {
+                Debug.LogWarning("[Splitscreen][P2HUD] HotkeyBar.UpdateIcons method not found; P2 hotbar sync disabled");
+            }
         }
 
         private void Update()
@@ -212,6 +223,7 @@ namespace ValheimSplitscreen.HUD
             UpdateHealthBar(p2);
             UpdateStaminaBar(p2);
             UpdateEitrBar(p2);
+            UpdateHotbar(p2);
 
             // Periodic update logging
             if (Time.time - _lastUpdateLogTime > 15f)
@@ -254,8 +266,9 @@ namespace ValheimSplitscreen.HUD
             // Search for hotbar
             _hotbarRoot = FindTransformByName("HotKeyBar");
             Debug.Log($"[Splitscreen][P2HUD] Path search: hotbar={_hotbarRoot != null}");
+            FindHotkeyBars();
 
-            if (_healthBarFill != null)
+            if (_healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0))
             {
                 _initialized = true;
                 Debug.Log("[Splitscreen][P2HUD] === FindUIElements END (SUCCESS via path search) ===");
@@ -323,7 +336,7 @@ namespace ValheimSplitscreen.HUD
                 }
             }
 
-            if (_healthBarFill != null)
+            if (_healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0))
             {
                 _initialized = true;
                 Debug.Log("[Splitscreen][P2HUD] === FindUIElements END (SUCCESS via broad search) ===");
@@ -387,6 +400,45 @@ namespace ValheimSplitscreen.HUD
 
             if (_eitrBarFill != null) _eitrBarFill.fillAmount = pct;
             if (_eitrBarSlow != null) _eitrBarSlow.fillAmount = Mathf.MoveTowards(_eitrBarSlow.fillAmount, pct, Time.deltaTime * 0.5f);
+        }
+
+        private void FindHotkeyBars()
+        {
+            _hotkeyBars = GetComponentsInChildren<HotkeyBar>(true);
+            Debug.Log($"[Splitscreen][P2HUD] Hotkey bars found: {_hotkeyBars.Length}");
+        }
+
+        private void UpdateHotbar(global::Player p2)
+        {
+            if (HotkeyBarUpdateIconsMethod == null) return;
+
+            if ((_hotkeyBars == null || _hotkeyBars.Length == 0) && Time.time - _lastHotbarSearchTime > 2f)
+            {
+                _lastHotbarSearchTime = Time.time;
+                FindHotkeyBars();
+            }
+
+            if (_hotkeyBars == null || _hotkeyBars.Length == 0) return;
+
+            _hotbarInvokeArgs[0] = p2;
+            for (int i = 0; i < _hotkeyBars.Length; i++)
+            {
+                var hotkeyBar = _hotkeyBars[i];
+                if (hotkeyBar == null) continue;
+
+                try
+                {
+                    HotkeyBarUpdateIconsMethod.Invoke(hotkeyBar, _hotbarInvokeArgs);
+                }
+                catch (Exception ex)
+                {
+                    if (Time.time - _lastLogTime > 10f)
+                    {
+                        _lastLogTime = Time.time;
+                        Debug.LogWarning($"[Splitscreen][P2HUD] Failed to update P2 hotbar via HotkeyBar.UpdateIcons: {ex.Message}");
+                    }
+                }
+            }
         }
 
         private Image FindImageByPath(params string[] paths)
