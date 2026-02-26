@@ -16,7 +16,7 @@ namespace ValheimSplitscreen.Camera
     /// </summary>
     public class SplitCameraManager : MonoBehaviour
     {
-        public const int Player2HudLayer = 31;
+        public static int Player2HudLayer { get; private set; } = 31;
 
         public static SplitCameraManager Instance { get; private set; }
 
@@ -107,6 +107,7 @@ namespace ValheimSplitscreen.Camera
             {
                 _uiLayerMask |= 1 << Hud.instance.m_rootObject.layer;
             }
+            ResolvePlayer2HudLayer();
 
             Debug.Log($"[Splitscreen][Camera] Original camera state:");
             Debug.Log($"[Splitscreen][Camera]   name={_originalCamera.gameObject.name}");
@@ -166,6 +167,44 @@ namespace ValheimSplitscreen.Camera
             Debug.Log($"[Splitscreen][Camera]   P2 UI:   targetRT={_p2UiCamera?.targetTexture?.name}, depth={_p2UiCamera?.depth}, cullMask={_p2UiCamera?.cullingMask}");
             Debug.Log($"[Splitscreen][Camera]   Compositor: depth={_compositorCamera?.depth}, targetRT={(_compositorCamera?.targetTexture != null ? _compositorCamera.targetTexture.name : "SCREEN")}");
             Debug.Log("[Splitscreen][Camera] === OnSplitscreenActivated END ===");
+        }
+
+        private void ResolvePlayer2HudLayer()
+        {
+            int mainUiLayer = Hud.instance?.m_rootObject != null
+                ? Hud.instance.m_rootObject.layer
+                : LayerMask.NameToLayer("UI");
+            if (mainUiLayer < 0)
+            {
+                mainUiLayer = 5;
+            }
+
+            int selectedLayer = FindUnusedHudLayer(mainUiLayer);
+            Player2HudLayer = selectedLayer;
+
+            string mainUiName = LayerMask.LayerToName(mainUiLayer);
+            string selectedName = LayerMask.LayerToName(selectedLayer);
+            Debug.Log($"[Splitscreen][Camera] P2 HUD layer selected: {selectedLayer} ('{selectedName}'), P1 HUD layer: {mainUiLayer} ('{mainUiName}')");
+        }
+
+        private static int FindUnusedHudLayer(int excludedLayer)
+        {
+            for (int i = 31; i >= 8; i--)
+            {
+                if (i == excludedLayer)
+                {
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(LayerMask.LayerToName(i)))
+                {
+                    return i;
+                }
+            }
+
+            if (31 != excludedLayer) return 31;
+            if (30 != excludedLayer) return 30;
+            return 29;
         }
 
         private void CreateRenderTextures(bool horizontal)

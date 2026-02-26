@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using TMPro;
@@ -10,16 +11,14 @@ using ValheimSplitscreen.Core;
 namespace ValheimSplitscreen.HUD
 {
     /// <summary>
-    /// Manages HUD duplication for splitscreen.
-    /// Clones the vanilla HUD canvas for Player 2, disables all scripts on the clone,
-    /// and adds a Player2HudUpdater to keep P2's HUD elements updated from P2's data.
-    /// The clone uses ScreenSpaceCamera mode targeting P2's camera so it renders into P2's RT.
+    /// Creates and manages a second HUD canvas for Player 2.
     /// </summary>
     public class SplitHudManager : MonoBehaviour
     {
         public static SplitHudManager Instance { get; private set; }
 
         private GameObject _p2HudClone;
+        private GameObject _p2MinimapSmallClone;
         private Canvas _p2Canvas;
         private Player2HudUpdater _p2Updater;
 
@@ -31,106 +30,166 @@ namespace ValheimSplitscreen.HUD
 
         public void OnSplitscreenActivated()
         {
-            Debug.Log("[Splitscreen][P2HUD] OnSplitscreenActivated - scheduling P2 HUD creation (0.5s delay)");
-            Invoke("CreatePlayer2Hud", 0.5f);
+            CancelInvoke(nameof(CreatePlayer2Hud));
+            Invoke(nameof(CreatePlayer2Hud), 0.5f);
         }
 
         public void OnSplitscreenDeactivated()
         {
-            Debug.Log("[Splitscreen][P2HUD] OnSplitscreenDeactivated");
-            CancelInvoke("CreatePlayer2Hud");
+            CancelInvoke(nameof(CreatePlayer2Hud));
             DestroyPlayer2Hud();
         }
 
         private void CreatePlayer2Hud()
         {
-            Debug.Log("[Splitscreen][P2HUD] === CreatePlayer2Hud START ===");
-
             if (_p2HudClone != null)
             {
-                Debug.Log("[Splitscreen][P2HUD] Clone already exists, skipping");
                 return;
             }
 
-            if (Hud.instance == null)
+            if (Hud.instance == null || Hud.instance.m_rootObject == null)
             {
-                Debug.LogWarning("[Splitscreen][P2HUD] Hud.instance is null, can't clone!");
+                Debug.LogWarning("[Splitscreen][P2HUD] Hud.instance or m_rootObject is null");
                 return;
             }
-            Debug.Log($"[Splitscreen][P2HUD] Hud.instance found, m_rootObject={Hud.instance.m_rootObject?.name}");
 
             var p2Camera = SplitCameraManager.Instance?.Player2UiCamera;
             if (p2Camera == null)
             {
-                Debug.LogWarning("[Splitscreen][P2HUD] P2 UI camera not available yet!");
+                Debug.LogWarning("[Splitscreen][P2HUD] P2 UI camera unavailable");
                 return;
             }
-            Debug.Log($"[Splitscreen][P2HUD] P2 UI camera available: {p2Camera.name}, targetTexture={p2Camera.targetTexture?.name}");
 
-            // Find the root canvas of the vanilla HUD
-            var sourceCanvas = Hud.instance.m_rootObject?.GetComponentInParent<Canvas>();
+            var sourceCanvas = Hud.instance.m_rootObject.GetComponentInParent<Canvas>();
             if (sourceCanvas == null)
             {
-                Debug.LogWarning("[Splitscreen][P2HUD] Could not find HUD canvas via GetComponentInParent<Canvas>!");
+                Debug.LogWarning("[Splitscreen][P2HUD] Source HUD canvas not found");
                 return;
             }
-            Debug.Log($"[Splitscreen][P2HUD] Source canvas: '{sourceCanvas.gameObject.name}', renderMode={sourceCanvas.renderMode}, worldCamera={sourceCanvas.worldCamera?.name}");
-            Debug.Log($"[Splitscreen][P2HUD] Source canvas childCount={sourceCanvas.transform.childCount}");
 
-            // Clone the entire HUD hierarchy
-            Debug.Log("[Splitscreen][P2HUD] Instantiating clone...");
-            _p2HudClone = Instantiate(sourceCanvas.gameObject);
-            _p2HudClone.name = "SplitscreenHUD_P2";
-            SetLayerRecursively(_p2HudClone, SplitCameraManager.Player2HudLayer);
-            Debug.Log($"[Splitscreen][P2HUD] Clone created: '{_p2HudClone.name}', childCount={_p2HudClone.transform.childCount}");
+            _p2HudClone = new GameObject("SplitscreenHUD_P2",
+                typeof(RectTransform),
+                typeof(Canvas),
+                typeof(CanvasScaler),
+                typeof(GraphicRaycaster));
 
-            // Disable ALL MonoBehaviours on the clone to prevent singleton conflicts
-            var scripts = _p2HudClone.GetComponentsInChildren<MonoBehaviour>(true);
-            int disabledCount = 0;
-            int skippedCount = 0;
-            foreach (var script in scripts)
+            var srcRect = sourceCanvas.GetComponent<RectTransform>();
+            var dstRect = _p2HudClone.GetComponent<RectTransform>();
+            if (srcRect != null)
             {
-                if (ShouldKeepScriptEnabled(script))
-                {
-                    skippedCount++;
-                    continue;
-                }
-                script.enabled = false;
-                disabledCount++;
-            }
-            Debug.Log($"[Splitscreen][P2HUD] Disabled {disabledCount} scripts, kept {skippedCount} render/layout scripts");
-
-            // Set up the clone's canvas
-            _p2Canvas = _p2HudClone.GetComponent<Canvas>();
-            if (_p2Canvas != null)
-            {
-                Debug.Log($"[Splitscreen][P2HUD] Clone canvas BEFORE: renderMode={_p2Canvas.renderMode}, worldCamera={_p2Canvas.worldCamera?.name}");
-                _p2Canvas.renderMode = RenderMode.ScreenSpaceCamera;
-                _p2Canvas.worldCamera = p2Camera;
-                _p2Canvas.planeDistance = 1f;
-                _p2Canvas.sortingOrder = 0;
-                Debug.Log($"[Splitscreen][P2HUD] Clone canvas AFTER: renderMode={_p2Canvas.renderMode}, worldCamera={_p2Canvas.worldCamera?.name}, planeDistance={_p2Canvas.planeDistance}");
+                dstRect.SetParent(srcRect.parent, false);
+                dstRect.anchorMin = srcRect.anchorMin;
+                dstRect.anchorMax = srcRect.anchorMax;
+                dstRect.pivot = srcRect.pivot;
+                dstRect.anchoredPosition = srcRect.anchoredPosition;
+                dstRect.sizeDelta = srcRect.sizeDelta;
+                dstRect.localScale = srcRect.localScale;
+                dstRect.localRotation = srcRect.localRotation;
             }
             else
             {
-                Debug.LogError("[Splitscreen][P2HUD] Clone has no Canvas component!");
+                dstRect.SetParent(sourceCanvas.transform.parent, false);
+                dstRect.anchorMin = Vector2.zero;
+                dstRect.anchorMax = Vector2.one;
+                dstRect.pivot = new Vector2(0.5f, 0.5f);
+                dstRect.anchoredPosition = Vector2.zero;
+                dstRect.sizeDelta = Vector2.zero;
             }
 
-            // Add updater
-            Debug.Log("[Splitscreen][P2HUD] Adding Player2HudUpdater...");
-            _p2Updater = _p2HudClone.AddComponent<Player2HudUpdater>();
+            _p2Canvas = _p2HudClone.GetComponent<Canvas>();
+            ConfigureCanvasForP2(_p2Canvas, sourceCanvas, p2Camera);
+            CopyCanvasScalerSettings(sourceCanvas.GetComponent<CanvasScaler>(), _p2HudClone.GetComponent<CanvasScaler>());
 
-            Debug.Log("[Splitscreen][P2HUD] === CreatePlayer2Hud END (SUCCESS) ===");
+            var hudRootClone = Instantiate(Hud.instance.m_rootObject, _p2HudClone.transform, false);
+            hudRootClone.name = "HudRoot_P2";
+
+            _p2MinimapSmallClone = TryCloneMinimapSmallRoot(_p2HudClone.transform);
+
+            SetLayerRecursively(_p2HudClone, SplitCameraManager.Player2HudLayer);
+            ConfigureAllCloneCanvases(_p2HudClone, p2Camera);
+            DisableNonRenderingScripts(_p2HudClone);
+
+            _p2Updater = _p2HudClone.AddComponent<Player2HudUpdater>();
+            _p2Updater.ConfigureMinimapMirror(Minimap.instance, _p2MinimapSmallClone);
+            Debug.Log("[Splitscreen][P2HUD] Player 2 HUD created");
         }
 
-        private static void SetLayerRecursively(GameObject root, int layer)
+        private static GameObject TryCloneMinimapSmallRoot(Transform parent)
         {
-            if (root == null) return;
-            var transforms = root.GetComponentsInChildren<Transform>(true);
-            for (int i = 0; i < transforms.Length; i++)
+            var sourceMinimap = Minimap.instance;
+            if (sourceMinimap == null || sourceMinimap.m_smallRoot == null)
             {
-                transforms[i].gameObject.layer = layer;
+                return null;
             }
+
+            var minimapClone = Instantiate(sourceMinimap.m_smallRoot, parent, false);
+            minimapClone.name = "P2_MinimapSmall";
+            minimapClone.SetActive(true);
+            return minimapClone;
+        }
+
+        private static void ConfigureCanvasForP2(Canvas targetCanvas, Canvas sourceCanvas, UnityEngine.Camera p2Camera)
+        {
+            targetCanvas.renderMode = RenderMode.ScreenSpaceCamera;
+            targetCanvas.worldCamera = p2Camera;
+            targetCanvas.planeDistance = 1f;
+            targetCanvas.sortingLayerID = sourceCanvas.sortingLayerID;
+            targetCanvas.sortingOrder = sourceCanvas.sortingOrder;
+            targetCanvas.pixelPerfect = sourceCanvas.pixelPerfect;
+            targetCanvas.additionalShaderChannels = sourceCanvas.additionalShaderChannels;
+        }
+
+        private static void ConfigureAllCloneCanvases(GameObject root, UnityEngine.Camera p2Camera)
+        {
+            var canvases = root.GetComponentsInChildren<Canvas>(true);
+            foreach (var canvas in canvases)
+            {
+                canvas.renderMode = RenderMode.ScreenSpaceCamera;
+                canvas.worldCamera = p2Camera;
+                canvas.planeDistance = 1f;
+                canvas.sortingOrder = 0;
+            }
+        }
+
+        private static void CopyCanvasScalerSettings(CanvasScaler source, CanvasScaler target)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            if (source == null)
+            {
+                target.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                target.referenceResolution = new Vector2(1920f, 1080f);
+                target.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+                target.matchWidthOrHeight = 0.5f;
+                return;
+            }
+
+            target.uiScaleMode = source.uiScaleMode;
+            target.referenceResolution = source.referenceResolution;
+            target.screenMatchMode = source.screenMatchMode;
+            target.matchWidthOrHeight = source.matchWidthOrHeight;
+            target.referencePixelsPerUnit = source.referencePixelsPerUnit;
+            target.dynamicPixelsPerUnit = source.dynamicPixelsPerUnit;
+            target.physicalUnit = source.physicalUnit;
+            target.fallbackScreenDPI = source.fallbackScreenDPI;
+            target.defaultSpriteDPI = source.defaultSpriteDPI;
+        }
+
+        private static void DisableNonRenderingScripts(GameObject root)
+        {
+            var scripts = root.GetComponentsInChildren<MonoBehaviour>(true);
+            int disabled = 0;
+            foreach (var script in scripts)
+            {
+                if (script == null) continue;
+                if (ShouldKeepScriptEnabled(script)) continue;
+                script.enabled = false;
+                disabled++;
+            }
+            Debug.Log($"[Splitscreen][P2HUD] Disabled {disabled} non-render scripts on P2 clone");
         }
 
         private static bool ShouldKeepScriptEnabled(MonoBehaviour script)
@@ -145,21 +204,28 @@ namespace ValheimSplitscreen.HUD
                 || script is TMP_Text;
         }
 
+        private static void SetLayerRecursively(GameObject root, int layer)
+        {
+            if (root == null) return;
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                transforms[i].gameObject.layer = layer;
+            }
+        }
+
         private void DestroyPlayer2Hud()
         {
-            if (_p2HudClone != null)
+            if (_p2HudClone == null)
             {
-                Debug.Log("[Splitscreen][P2HUD] Destroying P2 HUD clone...");
-                Destroy(_p2HudClone);
-                _p2HudClone = null;
-                _p2Canvas = null;
-                _p2Updater = null;
-                Debug.Log("[Splitscreen][P2HUD] P2 HUD clone destroyed");
+                return;
             }
-            else
-            {
-                Debug.Log("[Splitscreen][P2HUD] No P2 HUD clone to destroy");
-            }
+
+            Destroy(_p2HudClone);
+            _p2HudClone = null;
+            _p2MinimapSmallClone = null;
+            _p2Canvas = null;
+            _p2Updater = null;
         }
 
         private void OnDestroy()
@@ -169,7 +235,7 @@ namespace ValheimSplitscreen.HUD
     }
 
     /// <summary>
-    /// Updates the cloned P2 HUD elements each frame to reflect Player 2's actual data.
+    /// Updates selected HUD pieces in the cloned P2 HUD tree.
     /// </summary>
     public class Player2HudUpdater : MonoBehaviour
     {
@@ -181,30 +247,55 @@ namespace ValheimSplitscreen.HUD
         private Text _staminaText;
         private Image _eitrBarFill;
         private Image _eitrBarSlow;
-        private Transform _hotbarRoot;
+        private global::Hud _cloneHud;
+        private Minimap _cloneMinimap;
+
         private HotkeyBar[] _hotkeyBars = Array.Empty<HotkeyBar>();
         private readonly object[] _hotbarInvokeArgs = new object[1];
         private static readonly MethodInfo HotkeyBarUpdateIconsMethod = AccessTools.Method(typeof(HotkeyBar), "UpdateIcons");
 
         private bool _initialized;
-        private float _lastLogTime;
+        private bool _staticPanelsConfigured;
         private float _lastSearchTime;
         private float _lastHotbarSearchTime;
-        private float _lastUpdateLogTime;
-        private int _updateCount;
+        private float _lastMinimapConfigTime;
+        private float _lastSourceMinimapSearchTime;
+
+        // Optional minimap mirror path when the cloned HUD does not contain a Minimap component.
+        private GameObject _mirrorMinimapRoot;
+        private RawImage _mirrorMapImageSmall;
+        private RectTransform _mirrorSmallMarker;
+        private RectTransform _mirrorShipMarker;
+        private TMP_Text _mirrorBiomeNameSmall;
+
+        private RawImage _sourceMapImageSmall;
+        private RectTransform _sourceSmallMarker;
+        private RectTransform _sourceShipMarker;
+        private TMP_Text _sourceBiomeNameSmall;
 
         private void Awake()
         {
-            Debug.Log("[Splitscreen][P2HUD] Player2HudUpdater.Awake");
-            if (HotkeyBarUpdateIconsMethod == null)
+            _cloneHud = GetComponent<global::Hud>();
+            _cloneMinimap = GetComponentInChildren<Minimap>(true);
+        }
+
+        public void ConfigureMinimapMirror(Minimap sourceMinimap, GameObject mirrorSmallRoot)
+        {
+            _mirrorMinimapRoot = mirrorSmallRoot;
+            if (_mirrorMinimapRoot != null)
             {
-                Debug.LogWarning("[Splitscreen][P2HUD] HotkeyBar.UpdateIcons method not found; P2 hotbar sync disabled");
+                _mirrorMapImageSmall = FindRawImageByNameToken(_mirrorMinimapRoot.transform, "map");
+                _mirrorBiomeNameSmall = FindTmpTextByNameToken(_mirrorMinimapRoot.transform, "biome");
             }
+
+            BindSourceMinimap(sourceMinimap);
+            TryBindMirrorMarkersByName();
+            ConfigureMinimapVisibility();
         }
 
         private void Update()
         {
-            if (SplitScreenManager.Instance == null || !SplitScreenManager.Instance.SplitscreenActive) return;
+            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
             var p2 = SplitScreenManager.Instance.PlayerManager?.Player2;
             if (p2 == null) return;
@@ -219,152 +310,66 @@ namespace ValheimSplitscreen.HUD
                 if (!_initialized) return;
             }
 
-            _updateCount++;
             UpdateHealthBar(p2);
             UpdateStaminaBar(p2);
             UpdateEitrBar(p2);
             UpdateHotbar(p2);
+            UpdateMinimapMirror();
 
-            // Periodic update logging
-            if (Time.time - _lastUpdateLogTime > 15f)
+            if (Time.time - _lastMinimapConfigTime > 2f)
             {
-                _lastUpdateLogTime = Time.time;
-                Debug.Log($"[Splitscreen][P2HUD] Update #{_updateCount}: P2 HP={p2.GetHealth():F0}/{p2.GetMaxHealth():F0}, SP={p2.GetStamina():F0}/{p2.GetMaxStamina():F0}");
-                Debug.Log($"[Splitscreen][P2HUD]   healthFill={_healthBarFill?.fillAmount:F2}, staminaFill={_staminaBarFill?.fillAmount:F2}");
+                _lastMinimapConfigTime = Time.time;
+                ConfigureMinimapVisibility();
             }
         }
 
         private void FindUIElements()
         {
-            Debug.Log("[Splitscreen][P2HUD] === FindUIElements START ===");
-            Debug.Log($"[Splitscreen][P2HUD] Searching in transform: '{transform.name}', childCount={transform.childCount}");
-
-            // Log top-level children
-            for (int i = 0; i < transform.childCount; i++)
-            {
-                var child = transform.GetChild(i);
-                Debug.Log($"[Splitscreen][P2HUD]   Child[{i}]: '{child.gameObject.name}' active={child.gameObject.activeSelf}, childCount={child.childCount}");
-            }
-
-            // Search for health bar
             _healthBarFill = FindImageByPath("healthpanel/Health/health_fast", "darken/Health/health_fast", "Health/health_fast");
             _healthBarSlow = FindImageByPath("healthpanel/Health/health_slow", "darken/Health/health_slow", "Health/health_slow");
             _healthText = FindTextByPath("healthpanel/Health/HealthText", "darken/Health/HealthText", "Health/HealthText");
-            Debug.Log($"[Splitscreen][P2HUD] Path search: healthFill={_healthBarFill != null}, healthSlow={_healthBarSlow != null}, healthText={_healthText != null}");
 
-            // Search for stamina bar
             _staminaBarFill = FindImageByPath("healthpanel/staminapanel/Stamina/stamina_fast", "darken/Stamina/stamina_fast", "Stamina/stamina_fast", "staminapanel/Stamina/stamina_fast");
             _staminaBarSlow = FindImageByPath("healthpanel/staminapanel/Stamina/stamina_slow", "darken/Stamina/stamina_slow", "Stamina/stamina_slow", "staminapanel/Stamina/stamina_slow");
             _staminaText = FindTextByPath("healthpanel/staminapanel/StaminaText", "darken/StaminaText", "StaminaText", "staminapanel/StaminaText");
-            Debug.Log($"[Splitscreen][P2HUD] Path search: staminaFill={_staminaBarFill != null}, staminaSlow={_staminaBarSlow != null}, staminaText={_staminaText != null}");
 
-            // Search for eitr bar
             _eitrBarFill = FindImageByPath("healthpanel/eitrpanel/Eitr/eitr_fast", "darken/Eitr/eitr_fast", "Eitr/eitr_fast", "eitrpanel/Eitr/eitr_fast");
             _eitrBarSlow = FindImageByPath("healthpanel/eitrpanel/Eitr/eitr_slow", "darken/Eitr/eitr_slow", "Eitr/eitr_slow", "eitrpanel/Eitr/eitr_slow");
-            Debug.Log($"[Splitscreen][P2HUD] Path search: eitrFill={_eitrBarFill != null}, eitrSlow={_eitrBarSlow != null}");
 
-            // Search for hotbar
-            _hotbarRoot = FindTransformByName("HotKeyBar");
-            Debug.Log($"[Splitscreen][P2HUD] Path search: hotbar={_hotbarRoot != null}");
             FindHotkeyBars();
+            ConfigureStaticPanels();
+            ConfigureMinimapVisibility();
 
             if (_healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0))
             {
                 _initialized = true;
-                Debug.Log("[Splitscreen][P2HUD] === FindUIElements END (SUCCESS via path search) ===");
+                return;
             }
-            else
-            {
-                Debug.Log("[Splitscreen][P2HUD] Path search failed, trying broad search...");
-                TryBroadSearch();
-            }
+
+            TryBroadSearch();
+            _initialized = _healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0);
         }
 
         private void TryBroadSearch()
         {
             var images = GetComponentsInChildren<Image>(true);
-            Debug.Log($"[Splitscreen][P2HUD] Broad search: found {images.Length} Image components in clone");
             foreach (var img in images)
             {
                 string name = img.gameObject.name.ToLowerInvariant();
-                if (name.Contains("health") && name.Contains("fast") && _healthBarFill == null)
-                {
-                    _healthBarFill = img;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND health fill: '{img.gameObject.name}', fillAmount={img.fillAmount:F2}, type={img.type}");
-                }
-                else if (name.Contains("health") && name.Contains("slow") && _healthBarSlow == null)
-                {
-                    _healthBarSlow = img;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND health slow: '{img.gameObject.name}'");
-                }
-                else if (name.Contains("stamina") && name.Contains("fast") && _staminaBarFill == null)
-                {
-                    _staminaBarFill = img;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND stamina fill: '{img.gameObject.name}', fillAmount={img.fillAmount:F2}");
-                }
-                else if (name.Contains("stamina") && name.Contains("slow") && _staminaBarSlow == null)
-                {
-                    _staminaBarSlow = img;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND stamina slow: '{img.gameObject.name}'");
-                }
-                else if (name.Contains("eitr") && name.Contains("fast") && _eitrBarFill == null)
-                {
-                    _eitrBarFill = img;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND eitr fill: '{img.gameObject.name}'");
-                }
-                else if (name.Contains("eitr") && name.Contains("slow") && _eitrBarSlow == null)
-                {
-                    _eitrBarSlow = img;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND eitr slow: '{img.gameObject.name}'");
-                }
+                if (name.Contains("health") && name.Contains("fast") && _healthBarFill == null) _healthBarFill = img;
+                else if (name.Contains("health") && name.Contains("slow") && _healthBarSlow == null) _healthBarSlow = img;
+                else if (name.Contains("stamina") && name.Contains("fast") && _staminaBarFill == null) _staminaBarFill = img;
+                else if (name.Contains("stamina") && name.Contains("slow") && _staminaBarSlow == null) _staminaBarSlow = img;
+                else if (name.Contains("eitr") && name.Contains("fast") && _eitrBarFill == null) _eitrBarFill = img;
+                else if (name.Contains("eitr") && name.Contains("slow") && _eitrBarSlow == null) _eitrBarSlow = img;
             }
 
             var texts = GetComponentsInChildren<Text>(true);
-            Debug.Log($"[Splitscreen][P2HUD] Broad search: found {texts.Length} Text components in clone");
             foreach (var txt in texts)
             {
                 string name = txt.gameObject.name.ToLowerInvariant();
-                if (name.Contains("health") && name.Contains("text") && _healthText == null)
-                {
-                    _healthText = txt;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND health text: '{txt.gameObject.name}', text='{txt.text}'");
-                }
-                else if (name.Contains("stamina") && name.Contains("text") && _staminaText == null)
-                {
-                    _staminaText = txt;
-                    Debug.Log($"[Splitscreen][P2HUD] FOUND stamina text: '{txt.gameObject.name}', text='{txt.text}'");
-                }
-            }
-
-            if (_healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0))
-            {
-                _initialized = true;
-                Debug.Log("[Splitscreen][P2HUD] === FindUIElements END (SUCCESS via broad search) ===");
-            }
-            else
-            {
-                Debug.LogWarning("[Splitscreen][P2HUD] === FindUIElements END (FAILED - no health bar found!) ===");
-                Debug.Log("[Splitscreen][P2HUD] Dumping hierarchy (depth 4)...");
-                if (Time.time - _lastLogTime > 10f)
-                {
-                    _lastLogTime = Time.time;
-                    LogHierarchy(transform, 0, 4);
-                }
-            }
-        }
-
-        private void LogHierarchy(Transform t, int depth, int maxDepth)
-        {
-            if (depth > maxDepth) return;
-            string indent = new string(' ', depth * 2);
-            var img = t.GetComponent<Image>();
-            string imgInfo = img != null ? $" [Image type={img.type}, fill={img.fillAmount:F2}]" : "";
-            var txt = t.GetComponent<Text>();
-            string txtInfo = txt != null ? $" [Text='{txt.text}']" : "";
-            Debug.Log($"[Splitscreen][P2HUD] {indent}{t.gameObject.name}{imgInfo}{txtInfo} active={t.gameObject.activeSelf}");
-            for (int i = 0; i < t.childCount; i++)
-            {
-                LogHierarchy(t.GetChild(i), depth + 1, maxDepth);
+                if (name.Contains("health") && name.Contains("text") && _healthText == null) _healthText = txt;
+                else if (name.Contains("stamina") && name.Contains("text") && _staminaText == null) _staminaText = txt;
             }
         }
 
@@ -372,7 +377,7 @@ namespace ValheimSplitscreen.HUD
         {
             float health = p2.GetHealth();
             float maxHealth = p2.GetMaxHealth();
-            float pct = maxHealth > 0 ? health / maxHealth : 0f;
+            float pct = maxHealth > 0f ? health / maxHealth : 0f;
 
             if (_healthBarFill != null) _healthBarFill.fillAmount = pct;
             if (_healthBarSlow != null) _healthBarSlow.fillAmount = Mathf.MoveTowards(_healthBarSlow.fillAmount, pct, Time.deltaTime * 0.5f);
@@ -383,7 +388,7 @@ namespace ValheimSplitscreen.HUD
         {
             float stamina = p2.GetStamina();
             float maxStamina = p2.GetMaxStamina();
-            float pct = maxStamina > 0 ? stamina / maxStamina : 0f;
+            float pct = maxStamina > 0f ? stamina / maxStamina : 0f;
 
             if (_staminaBarFill != null) _staminaBarFill.fillAmount = pct;
             if (_staminaBarSlow != null) _staminaBarSlow.fillAmount = Mathf.MoveTowards(_staminaBarSlow.fillAmount, pct, Time.deltaTime * 0.5f);
@@ -393,19 +398,260 @@ namespace ValheimSplitscreen.HUD
         private void UpdateEitrBar(global::Player p2)
         {
             float maxEitr = p2.GetMaxEitr();
-            if (maxEitr <= 0) return;
+            if (maxEitr <= 0f) return;
 
             float eitr = p2.GetEitr();
             float pct = eitr / maxEitr;
-
             if (_eitrBarFill != null) _eitrBarFill.fillAmount = pct;
             if (_eitrBarSlow != null) _eitrBarSlow.fillAmount = Mathf.MoveTowards(_eitrBarSlow.fillAmount, pct, Time.deltaTime * 0.5f);
+        }
+
+        private void ConfigureStaticPanels()
+        {
+            if (_staticPanelsConfigured) return;
+
+            HideUnsupportedBranches();
+
+            if (_cloneHud == null)
+            {
+                _cloneHud = GetComponent<global::Hud>();
+                if (_cloneHud == null)
+                {
+                    DisableByNameTokens(
+                        "food", "status", "guardian", "event", "ship", "build",
+                        "crosshair", "hover", "target", "save", "connection",
+                        "loading", "mount", "action", "beta", "piece");
+                    _staticPanelsConfigured = true;
+                    return;
+                }
+            }
+
+            SafeSetActive(_cloneHud.m_buildHud, false);
+            SafeSetActive(_cloneHud.m_saveIcon, false);
+            SafeSetActive(_cloneHud.m_badConnectionIcon, false);
+            SafeSetActive(_cloneHud.m_betaText, false);
+            SafeSetActive(_cloneHud.m_actionBarRoot, false);
+            SafeSetActive(_cloneHud.m_mountPanel, false);
+            SafeSetActive(_cloneHud.m_shipHudRoot, false);
+            SafeSetActive(_cloneHud.m_shipControlsRoot, false);
+            SafeSetActive(_cloneHud.m_eventBar, false);
+            SafeSetActive(_cloneHud.m_targetedAlert, false);
+            SafeSetActive(_cloneHud.m_targeted, false);
+            SafeSetActive(_cloneHud.m_hidden, false);
+            SafeSetActive(_cloneHud.m_pieceSelectionWindow, false);
+
+            if (_cloneHud.m_statusEffectListRoot != null) SafeSetActive(_cloneHud.m_statusEffectListRoot.gameObject, false);
+            if (_cloneHud.m_foodBarRoot != null) SafeSetActive(_cloneHud.m_foodBarRoot.gameObject, false);
+            if (_cloneHud.m_gpRoot != null) SafeSetActive(_cloneHud.m_gpRoot.gameObject, false);
+            if (_cloneHud.m_loadingScreen != null) SafeSetActive(_cloneHud.m_loadingScreen.gameObject, false);
+            if (_cloneHud.m_crosshair != null) SafeSetActive(_cloneHud.m_crosshair.gameObject, false);
+            if (_cloneHud.m_crosshairBow != null) SafeSetActive(_cloneHud.m_crosshairBow.gameObject, false);
+            if (_cloneHud.m_hoverName != null) SafeSetActive(_cloneHud.m_hoverName.gameObject, false);
+            if (_cloneHud.m_damageScreen != null) SafeSetActive(_cloneHud.m_damageScreen.gameObject, false);
+            if (_cloneHud.m_lavaWarningScreen != null) SafeSetActive(_cloneHud.m_lavaWarningScreen.gameObject, false);
+
+            _staticPanelsConfigured = true;
+        }
+
+        private void HideUnsupportedBranches()
+        {
+            var keepRoots = new HashSet<Transform>();
+
+            CollectTopLevelRoot(_healthBarFill?.transform, keepRoots);
+            CollectTopLevelRoot(_healthBarSlow?.transform, keepRoots);
+            CollectTopLevelRoot(_staminaBarFill?.transform, keepRoots);
+            CollectTopLevelRoot(_staminaBarSlow?.transform, keepRoots);
+            CollectTopLevelRoot(_eitrBarFill?.transform, keepRoots);
+            CollectTopLevelRoot(_eitrBarSlow?.transform, keepRoots);
+
+            if (_hotkeyBars != null)
+            {
+                for (int i = 0; i < _hotkeyBars.Length; i++)
+                {
+                    CollectTopLevelRoot(_hotkeyBars[i]?.transform, keepRoots);
+                }
+            }
+
+            if (_cloneMinimap != null)
+            {
+                var minimapRoot = _cloneMinimap.m_smallRoot != null ? _cloneMinimap.m_smallRoot.transform : _cloneMinimap.transform;
+                CollectTopLevelRoot(minimapRoot, keepRoots);
+            }
+            if (_mirrorMinimapRoot != null)
+            {
+                CollectTopLevelRoot(_mirrorMinimapRoot.transform, keepRoots);
+            }
+
+            if (keepRoots.Count == 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < transform.childCount; i++)
+            {
+                var child = transform.GetChild(i);
+                child.gameObject.SetActive(keepRoots.Contains(child));
+            }
+        }
+
+        private void CollectTopLevelRoot(Transform leaf, HashSet<Transform> roots)
+        {
+            if (leaf == null) return;
+
+            var current = leaf;
+            while (current.parent != null && current.parent != transform)
+            {
+                current = current.parent;
+            }
+
+            if (current.parent == transform)
+            {
+                roots.Add(current);
+            }
+        }
+
+        private void DisableByNameTokens(params string[] tokens)
+        {
+            var transforms = GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                var go = transforms[i].gameObject;
+                string name = go.name.ToLowerInvariant();
+                bool match = false;
+                for (int t = 0; t < tokens.Length; t++)
+                {
+                    if (name.Contains(tokens[t]))
+                    {
+                        match = true;
+                        break;
+                    }
+                }
+                if (!match) continue;
+
+                if (name.Contains("health") || name.Contains("stamina") || name.Contains("eitr") ||
+                    name.Contains("hotkey") || name.Contains("minimap"))
+                {
+                    continue;
+                }
+
+                go.SetActive(false);
+            }
+        }
+
+        private void BindSourceMinimap(Minimap sourceMinimap)
+        {
+            if (sourceMinimap == null)
+            {
+                return;
+            }
+
+            _sourceMapImageSmall = sourceMinimap.m_mapImageSmall;
+            _sourceSmallMarker = sourceMinimap.m_smallMarker;
+            _sourceShipMarker = sourceMinimap.m_smallShipMarker;
+            _sourceBiomeNameSmall = sourceMinimap.m_biomeNameSmall;
+        }
+
+        private void TryBindMirrorMarkersByName()
+        {
+            if (_mirrorMinimapRoot == null)
+            {
+                return;
+            }
+
+            if (_sourceSmallMarker != null)
+            {
+                _mirrorSmallMarker = FindRectTransformByName(_mirrorMinimapRoot.transform, _sourceSmallMarker.gameObject.name);
+            }
+            if (_sourceShipMarker != null)
+            {
+                _mirrorShipMarker = FindRectTransformByName(_mirrorMinimapRoot.transform, _sourceShipMarker.gameObject.name);
+            }
+            if (_sourceBiomeNameSmall != null && _mirrorBiomeNameSmall == null)
+            {
+                _mirrorBiomeNameSmall = FindTmpTextByName(_mirrorMinimapRoot.transform, _sourceBiomeNameSmall.gameObject.name);
+            }
+        }
+
+        private void UpdateMinimapMirror()
+        {
+            if (_mirrorMinimapRoot == null)
+            {
+                return;
+            }
+
+            if (_sourceMapImageSmall == null && Time.time - _lastSourceMinimapSearchTime > 2f)
+            {
+                _lastSourceMinimapSearchTime = Time.time;
+                BindSourceMinimap(Minimap.instance);
+                TryBindMirrorMarkersByName();
+            }
+
+            _mirrorMinimapRoot.SetActive(true);
+            if (_mirrorMapImageSmall != null && _sourceMapImageSmall != null)
+            {
+                _mirrorMapImageSmall.uvRect = _sourceMapImageSmall.uvRect;
+                _mirrorMapImageSmall.texture = _sourceMapImageSmall.texture;
+                if (_sourceMapImageSmall.material != null)
+                {
+                    _mirrorMapImageSmall.material = _sourceMapImageSmall.material;
+                }
+            }
+
+            CopyMarker(_sourceSmallMarker, _mirrorSmallMarker);
+            CopyMarker(_sourceShipMarker, _mirrorShipMarker);
+
+            if (_sourceBiomeNameSmall != null && _mirrorBiomeNameSmall != null)
+            {
+                _mirrorBiomeNameSmall.text = _sourceBiomeNameSmall.text;
+            }
+        }
+
+        private static void CopyMarker(RectTransform source, RectTransform target)
+        {
+            if (source == null || target == null)
+            {
+                return;
+            }
+
+            target.anchoredPosition = source.anchoredPosition;
+            target.localRotation = source.localRotation;
+            target.localScale = source.localScale;
+        }
+
+        private void ConfigureMinimapVisibility()
+        {
+            if (_cloneMinimap == null)
+            {
+                _cloneMinimap = GetComponentInChildren<Minimap>(true);
+            }
+
+            if (_cloneMinimap != null)
+            {
+                if (_cloneMinimap.m_smallRoot != null) _cloneMinimap.m_smallRoot.SetActive(true);
+                if (_cloneMinimap.m_largeRoot != null) _cloneMinimap.m_largeRoot.SetActive(false);
+                if (_cloneMinimap.m_mapImageSmall != null) _cloneMinimap.m_mapImageSmall.gameObject.SetActive(true);
+                if (_cloneMinimap.m_mapImageLarge != null) _cloneMinimap.m_mapImageLarge.gameObject.SetActive(false);
+                if (_cloneMinimap.m_biomeNameSmall != null) _cloneMinimap.m_biomeNameSmall.gameObject.SetActive(true);
+                if (_cloneMinimap.m_gamepadCrosshair != null) _cloneMinimap.m_gamepadCrosshair.gameObject.SetActive(false);
+            }
+
+            if (_mirrorMinimapRoot != null)
+            {
+                _mirrorMinimapRoot.SetActive(true);
+            }
+        }
+
+        private static void SafeSetActive(GameObject go, bool active)
+        {
+            if (go != null)
+            {
+                go.SetActive(active);
+            }
         }
 
         private void FindHotkeyBars()
         {
             _hotkeyBars = GetComponentsInChildren<HotkeyBar>(true);
-            Debug.Log($"[Splitscreen][P2HUD] Hotkey bars found: {_hotkeyBars.Length}");
         }
 
         private void UpdateHotbar(global::Player p2)
@@ -430,13 +676,9 @@ namespace ValheimSplitscreen.HUD
                 {
                     HotkeyBarUpdateIconsMethod.Invoke(hotkeyBar, _hotbarInvokeArgs);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    if (Time.time - _lastLogTime > 10f)
-                    {
-                        _lastLogTime = Time.time;
-                        Debug.LogWarning($"[Splitscreen][P2HUD] Failed to update P2 hotbar via HotkeyBar.UpdateIcons: {ex.Message}");
-                    }
+                    // Keep HUD update robust even if one HotkeyBar signature changes.
                 }
             }
         }
@@ -469,12 +711,60 @@ namespace ValheimSplitscreen.HUD
             return null;
         }
 
-        private Transform FindTransformByName(string name)
+        private static RawImage FindRawImageByNameToken(Transform root, string token)
         {
-            var all = GetComponentsInChildren<Transform>(true);
-            foreach (var t in all)
+            if (root == null) return null;
+            token = token.ToLowerInvariant();
+            var images = root.GetComponentsInChildren<RawImage>(true);
+            for (int i = 0; i < images.Length; i++)
             {
-                if (t.gameObject.name == name) return t;
+                if (images[i].gameObject.name.ToLowerInvariant().Contains(token))
+                {
+                    return images[i];
+                }
+            }
+            return images.Length > 0 ? images[0] : null;
+        }
+
+        private static TMP_Text FindTmpTextByNameToken(Transform root, string token)
+        {
+            if (root == null) return null;
+            token = token.ToLowerInvariant();
+            var texts = root.GetComponentsInChildren<TMP_Text>(true);
+            for (int i = 0; i < texts.Length; i++)
+            {
+                if (texts[i].gameObject.name.ToLowerInvariant().Contains(token))
+                {
+                    return texts[i];
+                }
+            }
+            return null;
+        }
+
+        private static TMP_Text FindTmpTextByName(Transform root, string name)
+        {
+            if (root == null) return null;
+            var texts = root.GetComponentsInChildren<TMP_Text>(true);
+            for (int i = 0; i < texts.Length; i++)
+            {
+                if (texts[i].gameObject.name == name)
+                {
+                    return texts[i];
+                }
+            }
+            return null;
+        }
+
+        private static RectTransform FindRectTransformByName(Transform root, string name)
+        {
+            if (root == null) return null;
+            var all = root.GetComponentsInChildren<RectTransform>(true);
+            for (int i = 0; i < all.Length; i++)
+            {
+                if (all[i].gameObject.name == name)
+                {
+                    return all[i];
+                }
             }
             return null;
         }
