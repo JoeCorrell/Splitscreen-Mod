@@ -36,7 +36,22 @@ namespace ValheimSplitscreen.Input
             {
                 var config = SplitscreenPlugin.Instance?.SplitConfig;
                 if (config == null) return true; // default to keyboard
+                // In shared controller mode, P1 uses the gamepad too
+                if (config.SharedController.Value) return false;
                 return config.P1InputMode.Value == Player1InputMode.KeyboardMouse;
+            }
+        }
+
+        /// <summary>
+        /// True if shared controller mode is active — both players use the same gamepad.
+        /// Useful for testing with a single controller.
+        /// </summary>
+        public bool SharedControllerMode
+        {
+            get
+            {
+                var config = SplitscreenPlugin.Instance?.SplitConfig;
+                return config != null && config.SharedController.Value;
             }
         }
 
@@ -47,6 +62,12 @@ namespace ValheimSplitscreen.Input
         {
             int count = Gamepad.all.Count;
             if (count == 0) return null;
+
+            // Shared controller: both players use the same gamepad
+            if (SharedControllerMode)
+            {
+                return Gamepad.all[0];
+            }
 
             if (Player1UsesKeyboard)
             {
@@ -80,26 +101,46 @@ namespace ValheimSplitscreen.Input
         {
             if (SplitScreenManager.Instance == null || !SplitScreenManager.Instance.SplitscreenActive) return;
 
-            // Player 1 input: only needs state tracking if using a gamepad
-            var gp0 = GetGamepad(0);
-            if (gp0 != null)
-                _playerInputs[0].ReadFromGamepad(gp0);
+            if (SharedControllerMode)
+            {
+                // Both players read from the same gamepad
+                var gp = Gamepad.all.Count > 0 ? Gamepad.all[0] : null;
+                if (gp != null)
+                {
+                    _playerInputs[0].ReadFromGamepad(gp);
+                    _playerInputs[1].ReadFromGamepad(gp);
+                }
+                else
+                {
+                    _playerInputs[0].Clear();
+                    _playerInputs[1].ReadFromKeyboardFallback();
+                }
+            }
             else
-                _playerInputs[0].Clear(); // Player 1 on keyboard, handled by normal ZInput
+            {
+                // Player 1 input: only needs state tracking if using a gamepad
+                var gp0 = GetGamepad(0);
+                if (gp0 != null)
+                    _playerInputs[0].ReadFromGamepad(gp0);
+                else
+                    _playerInputs[0].Clear(); // Player 1 on keyboard, handled by normal ZInput
 
-            // Player 2 input: gamepad if available, otherwise keyboard fallback
-            var gp1 = GetGamepad(1);
-            if (gp1 != null)
-                _playerInputs[1].ReadFromGamepad(gp1);
-            else
-                _playerInputs[1].ReadFromKeyboardFallback(); // IJKL + numpad keys
+                // Player 2 input: gamepad if available, otherwise keyboard fallback
+                var gp1 = GetGamepad(1);
+                if (gp1 != null)
+                    _playerInputs[1].ReadFromGamepad(gp1);
+                else
+                    _playerInputs[1].ReadFromKeyboardFallback(); // IJKL + numpad keys
+            }
 
             // Periodic logging of input state
             if (Time.time - _lastInputLogTime > 15f)
             {
                 _lastInputLogTime = Time.time;
                 var p2input = _playerInputs[1];
-                Debug.Log($"[Splitscreen][Input] Gamepads={GamepadCount}, P1={( Player1UsesKeyboard ? "KB+Mouse" : "Gamepad0")}, P2={(gp1 != null ? gp1.displayName : "KeyboardFallback")}");
+                var p2gp = GetGamepad(1);
+                string p2Desc = p2gp != null ? p2gp.displayName : "KeyboardFallback";
+                Debug.Log($"[Splitscreen][Input] Gamepads={GamepadCount}, P1={( Player1UsesKeyboard ? "KB+Mouse" : "Gamepad0")}, P2={p2Desc}, SharedCtrl={SharedControllerMode}");
                 Debug.Log($"[Splitscreen][Input] P2 raw input: move=({p2input.MoveAxis.x:F2},{p2input.MoveAxis.y:F2}), look=({p2input.LookAxis.x:F2},{p2input.LookAxis.y:F2}), A={p2input.ButtonSouth}, B={p2input.ButtonEast}, RB={p2input.RightShoulder}, LB={p2input.LeftShoulder}");
             }
         }

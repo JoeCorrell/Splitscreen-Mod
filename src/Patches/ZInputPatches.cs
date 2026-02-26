@@ -21,12 +21,14 @@ namespace ValheimSplitscreen.Patches
     [HarmonyPatch]
     public static class ZInputPatches
     {
-        // Rate-limit logging for per-frame patches
+            // Rate-limit logging for per-frame patches
         private static float _lastButtonBlockLogTime;
         private static float _lastStickLogTime;
         private static float _lastModeLogTime;
         private static int _blockedButtonCount;
         private static string _lastBlockedButton;
+        private static float _lastUnmappedLogTime;
+        private static string _lastUnmappedButton;
 
         /// <summary>
         /// Get the player index currently executing input code.
@@ -94,6 +96,11 @@ namespace ValheimSplitscreen.Patches
                 case "MapZoomOut":
                 case "Sit":
                 case "Hide":
+                case "GPower":
+                case "AutoPickup":
+                case "AltPlace":
+                case "BuildMenu":
+                case "Remove":
                     return true;
                 default:
                     return false;
@@ -148,6 +155,11 @@ namespace ValheimSplitscreen.Patches
                     __result = state.GetButton(name);
                 }
             }
+            else if (context == 1 && !IsJoyButton(name) && __result)
+            {
+                // P2 context but non-routed keyboard action returned true — block P1 keyboard leak
+                __result = false;
+            }
         }
 
         [HarmonyPatch(typeof(ZInput), "GetButtonDown")]
@@ -174,6 +186,17 @@ namespace ValheimSplitscreen.Patches
                 {
                     __result = state.GetButtonDown(name);
                 }
+            }
+            else if (context == 1 && !IsJoyButton(name) && __result)
+            {
+                // P2 context but non-routed keyboard action returned true — P1 keyboard leaking
+                if (Time.time - _lastUnmappedLogTime > 2f)
+                {
+                    _lastUnmappedLogTime = Time.time;
+                    _lastUnmappedButton = name;
+                    Debug.LogWarning($"[Splitscreen][ZInput] P2 context: non-routed button '{name}' returned true (P1 keyboard leak?) — blocking");
+                }
+                __result = false;
             }
         }
 

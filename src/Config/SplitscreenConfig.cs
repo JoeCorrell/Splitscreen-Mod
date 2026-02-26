@@ -13,6 +13,8 @@ namespace ValheimSplitscreen.Config
         public ConfigEntry<bool> IndependentInventory { get; }
         public ConfigEntry<string> Player2Name { get; }
         public ConfigEntry<bool> DebugMode { get; }
+        public ConfigEntry<bool> ForceLanHosting { get; }
+        public ConfigEntry<bool> SharedController { get; }
 
         public SplitscreenConfig(ConfigFile config)
         {
@@ -42,6 +44,12 @@ namespace ValheimSplitscreen.Config
 
             Player2ProfileSlot = config.Bind("Gameplay", "Player2ProfileSlot", 1f,
                 "Profile slot number for Player 2 save data (not used by Player 1).");
+
+            ForceLanHosting = config.Bind("Network", "ForceLanHosting", true,
+                "When splitscreen is active, force the world to be open for LAN connections so other players can join.");
+
+            SharedController = config.Bind("Input", "SharedController", false,
+                "Both players use the same gamepad. Useful for testing with a single controller.");
         }
     }
 

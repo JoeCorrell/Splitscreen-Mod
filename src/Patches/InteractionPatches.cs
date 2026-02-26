@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 using ValheimSplitscreen.Core;
+using ValheimSplitscreen.Player;
 
 namespace ValheimSplitscreen.Patches
 {
@@ -38,6 +39,7 @@ namespace ValheimSplitscreen.Patches
             if (bedOwner != 0L && bedOwner == p2.GetPlayerID())
             {
                 __result = true;
+                SplitscreenLog.Log("Interact", $"Bed.IsCurrent: P2 owns this bed (owner={bedOwner})");
             }
         }
 
@@ -90,6 +92,7 @@ namespace ValheimSplitscreen.Patches
             if (piece != null && piece.GetCreator() == p1ID)
             {
                 __result = true;
+                SplitscreenLog.Log("Interact", "PrivateArea: P2 permitted via P1 ward ownership");
             }
         }
     }

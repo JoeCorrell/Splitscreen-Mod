@@ -640,6 +640,19 @@ namespace ValheimSplitscreen.Camera
                 Debug.Log($"[Splitscreen][Camera] P2 cam pos={_p2CameraObj.transform.position}, P2 player pos={p2.transform.position}, dist={_p2Distance}");
             }
 
+            // Lock UI camera transforms — they inherit parent (game camera) rotation,
+            // but ScreenSpaceCamera canvases need a non-rotated camera to render correctly.
+            if (_p1UiCamera != null)
+            {
+                _p1UiCamera.transform.localPosition = Vector3.zero;
+                _p1UiCamera.transform.localRotation = Quaternion.identity;
+            }
+            if (_p2UiCamera != null)
+            {
+                _p2UiCamera.transform.localPosition = Vector3.zero;
+                _p2UiCamera.transform.localRotation = Quaternion.identity;
+            }
+
             UpdatePlayer2Camera(p2, Time.unscaledDeltaTime);
         }
 

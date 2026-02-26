@@ -1,7 +1,7 @@
+using System.Collections;
 using HarmonyLib;
 using UnityEngine;
 using ValheimSplitscreen.Core;
-using ValheimSplitscreen.Player;
 
 namespace ValheimSplitscreen.Patches
 {
@@ -52,6 +52,38 @@ namespace ValheimSplitscreen.Patches
         }
 
         /// <summary>
+        /// When P1 spawns into a world and splitscreen is Armed (P2 selected on main menu),
+        /// auto-activate splitscreen after a short delay to let the world initialize.
+        /// </summary>
+        [HarmonyPatch(typeof(global::Player), "SetLocalPlayer")]
+        [HarmonyPostfix]
+        public static void SetLocalPlayer_AutoActivate(global::Player __instance)
+        {
+            var mgr = SplitScreenManager.Instance;
+            if (mgr == null || mgr.State != SplitscreenState.Armed) return;
+
+            // Don't trigger during P2 spawn
+            var pm = mgr.PlayerManager;
+            if (pm != null && (pm.IsSpawningPlayer2 || pm.IsPlayer2(__instance))) return;
+
+            Debug.Log($"[Splitscreen][Patch] P1 spawned while Armed -> scheduling auto-activation");
+            mgr.StartCoroutine(DelayedAutoActivate());
+        }
+
+        private static IEnumerator DelayedAutoActivate()
+        {
+            // Wait for world, cameras, HUD to fully initialize
+            yield return new WaitForSeconds(1.5f);
+
+            var mgr = SplitScreenManager.Instance;
+            if (mgr == null || mgr.State != SplitscreenState.Armed) yield break;
+            if (Game.instance == null || global::Player.m_localPlayer == null) yield break;
+
+            Debug.Log("[Splitscreen][Patch] Delayed auto-activate firing");
+            mgr.OnWorldLoaded();
+        }
+
+        /// <summary>
         /// During Player 2's FixedUpdate, temporarily set m_localPlayer to Player 2.
         /// This prevents the self-destruction check (Player.cs line 740-744) which destroys
         /// any owned Player that isn't m_localPlayer. It also makes all the Player logic
@@ -73,7 +105,7 @@ namespace ValheimSplitscreen.Patches
                 if (Time.time - _lastSwapLogTime > 10f)
                 {
                     _lastSwapLogTime = Time.time;
-                    Debug.Log($"[Splitscreen][Patch] FixedUpdate: swapped m_localPlayer to P2 (P1={__state?.GetPlayerName()}, P2={__instance.GetPlayerName()})");
+                    SplitscreenLog.Log("Player", $"FixedUpdate: swapped m_localPlayer to P2 (P1={__state?.GetPlayerName()}, P2={__instance.GetPlayerName()}, pos={__instance.transform.position})");
                 }
             }
         }
@@ -103,6 +135,9 @@ namespace ValheimSplitscreen.Patches
             {
                 __state = global::Player.m_localPlayer;
                 global::Player.m_localPlayer = __instance;
+                // Set IsUpdatingPlayer2 so ZInput patches route to P2's input state
+                // during Player.Update (interactions, item use, etc.)
+                mgr.IsUpdatingPlayer2 = true;
             }
         }
 
@@ -113,6 +148,9 @@ namespace ValheimSplitscreen.Patches
             if (__state != null)
             {
                 global::Player.m_localPlayer = __state;
+                var mgr = SplitScreenManager.Instance?.PlayerManager;
+                if (mgr != null)
+                    mgr.IsUpdatingPlayer2 = false;
             }
         }
 
@@ -150,15 +188,22 @@ namespace ValheimSplitscreen.Patches
         }
 
         /// <summary>
-        /// When the game shuts down, ensure Player 2 is cleaned up.
+        /// When the game shuts down, save P2 profile and re-arm splitscreen
+        /// so the user doesn't need to re-select P2's character on the main menu.
         /// </summary>
         [HarmonyPatch(typeof(Game), "Shutdown")]
         [HarmonyPrefix]
         public static void Shutdown_Prefix()
         {
-            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
-            Debug.Log("[Splitscreen][Patch] Game.Shutdown -> saving P2 profile");
-            SplitScreenManager.Instance.PlayerManager?.SavePlayer2Profile();
+            var mgr = SplitScreenManager.Instance;
+            if (mgr == null) return;
+
+            if (mgr.SplitscreenActive)
+            {
+                Debug.Log("[Splitscreen][Patch] Game.Shutdown -> saving P2 profile + re-arming");
+                mgr.PlayerManager?.SavePlayer2Profile();
+                mgr.DeactivateAndRearm();
+            }
         }
 
         /// <summary>

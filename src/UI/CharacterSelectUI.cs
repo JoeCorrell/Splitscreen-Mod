@@ -5,14 +5,22 @@ using UnityEngine;
 namespace ValheimSplitscreen.UI
 {
     /// <summary>
-    /// IMGUI overlay that lets the user pick a character profile for Player 2
-    /// before splitscreen activates.
+    /// IMGUI overlay that lets the user pick a character profile for Player 2.
+    /// Supports two display modes:
+    /// - In-game mode: centered full-screen overlay with dark background
+    /// - Main menu mode: right-aligned side panel that doesn't block the main menu
     /// </summary>
     public class CharacterSelectUI : MonoBehaviour
     {
         public static CharacterSelectUI Instance { get; private set; }
 
         public bool IsVisible { get; private set; }
+
+        /// <summary>
+        /// When true, draws as a right-side panel on the main menu.
+        /// When false, draws as a centered overlay (in-game mode).
+        /// </summary>
+        public bool IsMainMenuMode { get; set; }
 
         private List<PlayerProfile> _profiles;
         private Vector2 _scrollPos;
@@ -26,7 +34,7 @@ namespace ValheimSplitscreen.UI
         private GUIStyle _headerStyle;
         private bool _stylesInitialized;
 
-        // Cursor state to restore on close
+        // Cursor state to restore on close (only used in in-game mode)
         private CursorLockMode _prevCursorLock;
         private bool _prevCursorVisible;
 
@@ -37,6 +45,7 @@ namespace ValheimSplitscreen.UI
 
         /// <summary>
         /// Show the character selection overlay.
+        /// Set IsMainMenuMode before calling this.
         /// </summary>
         public void Show(Action<PlayerProfile> onSelected, Action onCancelled)
         {
@@ -54,14 +63,17 @@ namespace ValheimSplitscreen.UI
                 Debug.Log($"[Splitscreen][CharSelect]   [{i}] name='{_profiles[i].GetName()}' file='{_profiles[i].GetFilename()}'");
             }
 
-            // Save and unlock cursor
-            _prevCursorLock = Cursor.lockState;
-            _prevCursorVisible = Cursor.visible;
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
+            // Save and unlock cursor (only needed in-game where cursor is locked)
+            if (!IsMainMenuMode)
+            {
+                _prevCursorLock = Cursor.lockState;
+                _prevCursorVisible = Cursor.visible;
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+            }
 
             IsVisible = true;
-            Debug.Log($"[Splitscreen][CharSelect] UI opened, cursor unlocked");
+            Debug.Log($"[Splitscreen][CharSelect] UI opened, menuMode={IsMainMenuMode}");
         }
 
         /// <summary>
@@ -70,8 +82,11 @@ namespace ValheimSplitscreen.UI
         public void Hide()
         {
             IsVisible = false;
-            Cursor.lockState = _prevCursorLock;
-            Cursor.visible = _prevCursorVisible;
+            if (!IsMainMenuMode)
+            {
+                Cursor.lockState = _prevCursorLock;
+                Cursor.visible = _prevCursorVisible;
+            }
         }
 
         private void Update()
@@ -125,6 +140,54 @@ namespace ValheimSplitscreen.UI
 
             InitStyles();
 
+            if (IsMainMenuMode)
+            {
+                DrawMainMenuPanel();
+            }
+            else
+            {
+                DrawInGameOverlay();
+            }
+        }
+
+        /// <summary>Right-aligned side panel for main menu mode.</summary>
+        private void DrawMainMenuPanel()
+        {
+            float panelW = 400f;
+            float panelH = Mathf.Min(Screen.height * 0.7f, 600f);
+            float panelX = Screen.width - panelW - 30f;
+            float panelY = (Screen.height - panelH) / 2f;
+            Rect panelRect = new Rect(panelX, panelY, panelW, panelH);
+
+            // Semi-transparent background for the panel only
+            GUI.color = new Color(0, 0, 0, 0.8f);
+            GUI.DrawTexture(panelRect, Texture2D.whiteTexture);
+            GUI.color = Color.white;
+
+            GUI.Box(panelRect, "", _windowStyle);
+
+            GUILayout.BeginArea(new Rect(panelX + 20, panelY + 15, panelW - 40, panelH - 30));
+
+            GUILayout.Label("Player 2 - Select Character", _headerStyle);
+            GUILayout.Space(5);
+
+            var subtitleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 12,
+                alignment = TextAnchor.MiddleCenter,
+                normal = { textColor = new Color(0.7f, 0.7f, 0.7f) }
+            };
+            GUILayout.Label("Press F10 or Escape to cancel", subtitleStyle);
+            GUILayout.Space(10);
+
+            DrawProfileList(panelH - 170);
+
+            GUILayout.EndArea();
+        }
+
+        /// <summary>Centered full-screen overlay for in-game mode.</summary>
+        private void DrawInGameOverlay()
+        {
             // Semi-transparent background overlay
             GUI.color = new Color(0, 0, 0, 0.7f);
             GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
@@ -141,12 +204,17 @@ namespace ValheimSplitscreen.UI
 
             GUILayout.BeginArea(new Rect(panelX + 20, panelY + 15, panelW - 40, panelH - 30));
 
-            // Header
             GUILayout.Label("Select Character for Player 2", _headerStyle);
             GUILayout.Space(10);
 
-            // Scrollable list of profiles
-            float listHeight = panelH - 150; // Leave room for header + buttons
+            DrawProfileList(panelH - 150);
+
+            GUILayout.EndArea();
+        }
+
+        /// <summary>Shared profile list + buttons used by both modes.</summary>
+        private void DrawProfileList(float listHeight)
+        {
             _scrollPos = GUILayout.BeginScrollView(_scrollPos, GUILayout.Height(listHeight));
 
             if (_profiles != null && _profiles.Count > 0)
@@ -156,7 +224,6 @@ namespace ValheimSplitscreen.UI
                     string displayName = profile.GetName();
                     string filename = profile.GetFilename();
 
-                    // Show filename in parentheses if different from name
                     string label = displayName;
                     if (!string.Equals(displayName, filename, StringComparison.OrdinalIgnoreCase))
                     {
@@ -183,7 +250,6 @@ namespace ValheimSplitscreen.UI
             if (GUILayout.Button("+ Create New Character", _buttonStyle))
             {
                 Hide();
-                // Pass null to signal "create new"
                 _onSelected?.Invoke(null);
             }
 
@@ -195,8 +261,6 @@ namespace ValheimSplitscreen.UI
                 _onCancelled?.Invoke();
             }
             GUI.color = Color.white;
-
-            GUILayout.EndArea();
         }
 
         private void OnDestroy()

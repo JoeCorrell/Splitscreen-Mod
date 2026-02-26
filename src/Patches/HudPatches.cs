@@ -22,6 +22,7 @@ namespace ValheimSplitscreen.Patches
         private static float _savedPlaneDistance;
         private static int _savedSortingOrder;
         private static float _lastHudLogTime;
+        private static Canvas _cachedHudCanvas;
 
         /// <summary>
         /// After HUD updates, enforce ScreenSpaceCamera mode pointing at P1's camera.
@@ -34,7 +35,9 @@ namespace ValheimSplitscreen.Patches
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
             if (SplitCameraManager.Instance == null) return;
 
-            var canvas = __instance.m_rootObject?.GetComponentInParent<Canvas>();
+            if (_cachedHudCanvas == null)
+                _cachedHudCanvas = __instance.m_rootObject?.GetComponentInParent<Canvas>();
+            var canvas = _cachedHudCanvas;
             if (canvas == null)
             {
                 if (Time.time - _lastHudLogTime > 5f)
@@ -134,42 +137,46 @@ namespace ValheimSplitscreen.Patches
     [HarmonyPatch]
     public static class HotkeyBarPatches
     {
-        private static bool _swapped;
-        private static global::Player _savedLocal;
+        private static int _cachedChildCount;
 
         [HarmonyPatch(typeof(HotkeyBar), "Update")]
         [HarmonyPrefix]
-        public static void Update_Prefix(HotkeyBar __instance)
+        public static void Update_Prefix(HotkeyBar __instance, out global::Player __state)
         {
-            _swapped = false;
+            __state = null;
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
             if (__instance.gameObject.layer != SplitCameraManager.Player2HudLayer) return;
 
             var p2 = SplitScreenManager.Instance.PlayerManager?.Player2;
             if (p2 == null) return;
 
-            _savedLocal = global::Player.m_localPlayer;
+            __state = global::Player.m_localPlayer;
             global::Player.m_localPlayer = p2;
-            _swapped = true;
+
+            if (SplitscreenLog.ShouldLog("HotkeyBar.swap", 10f))
+                SplitscreenLog.Log("HotkeyBar", $"Swapped m_localPlayer to P2 for HotkeyBar on layer {__instance.gameObject.layer}");
         }
 
         [HarmonyPatch(typeof(HotkeyBar), "Update")]
         [HarmonyPostfix]
-        public static void Update_Postfix(HotkeyBar __instance)
+        public static void Update_Postfix(HotkeyBar __instance, global::Player __state)
         {
-            if (_swapped)
+            if (__state != null)
             {
-                global::Player.m_localPlayer = _savedLocal;
-                _savedLocal = null;
-                _swapped = false;
+                global::Player.m_localPlayer = __state;
             }
 
-            // Re-layer any newly created icon children to P2's HUD layer
+            // Re-layer children to P2's HUD layer only when child count changes
             if (__instance.gameObject.layer == SplitCameraManager.Player2HudLayer)
             {
-                var transforms = __instance.GetComponentsInChildren<Transform>(true);
-                for (int i = 0; i < transforms.Length; i++)
-                    transforms[i].gameObject.layer = SplitCameraManager.Player2HudLayer;
+                int childCount = __instance.transform.childCount;
+                if (childCount != _cachedChildCount)
+                {
+                    _cachedChildCount = childCount;
+                    var transforms = __instance.GetComponentsInChildren<Transform>(true);
+                    for (int i = 0; i < transforms.Length; i++)
+                        transforms[i].gameObject.layer = SplitCameraManager.Player2HudLayer;
+                }
             }
         }
     }

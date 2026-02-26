@@ -1,6 +1,7 @@
 using UnityEngine;
 using ValheimSplitscreen.Core;
 using ValheimSplitscreen.Input;
+using ValheimSplitscreen.Patches;
 
 namespace ValheimSplitscreen.Player
 {
@@ -256,8 +257,9 @@ namespace ValheimSplitscreen.Player
 
             try
             {
-                // Mirror PlayerController input rules so P2 obeys current Valheim gamepad layout.
-                bool inInventoryEtc = InventoryGui.IsVisible() || Minimap.IsOpen() || StoreGui.IsVisible();
+                // Only block P2 combat/look when P2 actually owns the open UI panel.
+                bool p2OwnsInventory = InventoryGui.IsVisible() && Patches.InventoryGuiPatches.ActiveOwnerPlayerIndex == 1;
+                bool inInventoryEtc = p2OwnsInventory || Minimap.IsOpen();
                 bool inPieceSelection = Hud.IsPieceSelectionVisible();
                 bool inRadial = Hud.InRadial();
 
@@ -282,7 +284,7 @@ namespace ValheimSplitscreen.Player
                 bool jump = (jumpHeld && !_p2LastJump) || (input.GetButtonDown("JoyJump") && !inPieceSelection && !inInventoryEtc && !inRadial);
                 _p2LastJump = jumpHeld;
 
-                bool crouchHeld = (input.GetButton("Crouch") || input.GetButtonPressedTimer("JoyCrouch") > 0.33f) && !InventoryGui.IsVisible() && !inRadial;
+                bool crouchHeld = (input.GetButton("Crouch") || input.GetButtonPressedTimer("JoyCrouch") > 0.33f) && !inInventoryEtc && !inRadial;
                 bool crouch = crouchHeld && !_p2LastCrouch;
                 _p2LastCrouch = crouchHeld;
 

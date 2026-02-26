@@ -36,6 +36,12 @@ namespace ValheimSplitscreen.Patches
         // 0 = Player 1, 1 = Player 2
         private static int _activeInventoryPlayerIndex;
 
+        /// <summary>
+        /// Exposes which player currently owns the inventory panel.
+        /// 0 = Player 1, 1 = Player 2. Used by CraftingPatches and SharedGuiPatches.
+        /// </summary>
+        public static int ActiveOwnerPlayerIndex => _activeInventoryPlayerIndex;
+
         // Temporary local-player swap for InventoryGui.Update when P2 owns the panel.
         private static bool _swappedLocalForUpdate;
         private static global::Player _savedLocalBeforeUpdate;
@@ -49,6 +55,8 @@ namespace ValheimSplitscreen.Patches
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
             _activeInventoryPlayerIndex = GetContextPlayerIndex();
+            var localName = global::Player.m_localPlayer?.GetPlayerName();
+            SplitscreenLog.Log("Inventory", $"Show: owner=P{_activeInventoryPlayerIndex + 1}, m_localPlayer='{localName}'");
         }
 
         [HarmonyPatch(typeof(InventoryGui), "Hide")]
@@ -56,6 +64,7 @@ namespace ValheimSplitscreen.Patches
         public static void Hide_Postfix()
         {
             if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+            SplitscreenLog.Log("Inventory", $"Hide: was owner=P{_activeInventoryPlayerIndex + 1}");
             _activeInventoryPlayerIndex = 0;
         }
 
@@ -162,51 +171,49 @@ namespace ValheimSplitscreen.Patches
 
         private static void TryOpenInventoryForPlayer2(InventoryGui inventoryGui)
         {
-            if (IsInventoryVisible(inventoryGui))
-            {
-                return;
-            }
-
-            if (SplitInputManager.Instance == null)
-            {
-                return;
-            }
+            if (SplitInputManager.Instance == null) return;
 
             var p2 = SplitScreenManager.Instance?.PlayerManager?.Player2;
-            if (p2 == null || p2.IsDead() || p2.InCutscene() || p2.IsTeleporting())
-            {
-                return;
-            }
-
-            if (global::Console.IsVisible() || Menu.IsVisible() || Minimap.IsOpen() || Hud.InRadial())
-            {
-                return;
-            }
-            if (Chat.instance != null && Chat.instance.HasFocus())
-            {
-                return;
-            }
-            if (TextViewer.instance != null && TextViewer.instance.IsVisible())
-            {
-                return;
-            }
-            if (GameCamera.InFreeFly())
-            {
-                return;
-            }
+            if (p2 == null || p2.IsDead() || p2.InCutscene() || p2.IsTeleporting()) return;
 
             var p2Input = SplitInputManager.Instance.GetInputState(1);
-            if (p2Input == null)
-            {
-                return;
-            }
+            if (p2Input == null) return;
 
             bool openPressed = p2Input.GetButtonDown("Inventory") || p2Input.GetButtonDown("JoyButtonY");
-            if (!openPressed)
+            if (!openPressed) return;
+
+            // If inventory is already visible...
+            if (IsInventoryVisible(inventoryGui))
             {
+                if (_activeInventoryPlayerIndex == 1)
+                {
+                    // P2 owns it — close it
+                    SplitscreenLog.Log("Inventory", "P2 closing own inventory");
+                    inventoryGui.Hide();
+                    _activeInventoryPlayerIndex = 0;
+                }
+                else
+                {
+                    // P1 owns it — transfer to P2
+                    SplitscreenLog.Log("Inventory", "Transferring inventory from P1 to P2");
+                    inventoryGui.Hide();
+                    _activeInventoryPlayerIndex = 1;
+                    ExecuteAsPlayer(p2, () =>
+                    {
+                        inventoryGui.Show(null);
+                    });
+                }
                 return;
             }
 
+            // Inventory not visible — check blocking conditions
+            if (global::Console.IsVisible() || Menu.IsVisible() || Minimap.IsOpen() || Hud.InRadial() || Hud.IsPieceSelectionVisible())
+                return;
+            if (Chat.instance != null && Chat.instance.HasFocus()) return;
+            if (TextViewer.instance != null && TextViewer.instance.IsVisible()) return;
+            if (GameCamera.InFreeFly()) return;
+
+            // Open fresh for P2
             _activeInventoryPlayerIndex = 1;
             ExecuteAsPlayer(p2, () =>
             {
@@ -346,6 +353,7 @@ namespace ValheimSplitscreen.Patches
     {
         [ThreadStatic] private static bool _didRemap;
         [ThreadStatic] private static Vector2 _savedPosition;
+        [ThreadStatic] private static Vector2 _savedPressPosition;
 
         [HarmonyPatch(typeof(GraphicRaycaster), "Raycast",
             new[] { typeof(PointerEventData), typeof(List<RaycastResult>) })]
@@ -369,6 +377,7 @@ namespace ValheimSplitscreen.Patches
 
             bool horizontal = SplitscreenPlugin.Instance?.SplitConfig?.Orientation?.Value == SplitOrientation.Horizontal;
             _savedPosition = eventData.position;
+            _savedPressPosition = eventData.pressPosition;
             Vector2 pos = eventData.position;
 
             if (horizontal)
@@ -378,6 +387,9 @@ namespace ValheimSplitscreen.Patches
                 {
                     pos.y -= halfH;
                     eventData.position = pos;
+                    // Also remap pressPosition so drag-and-drop detection works correctly
+                    var pp = eventData.pressPosition;
+                    if (pp.y >= halfH) { pp.y -= halfH; eventData.pressPosition = pp; }
                     _didRemap = true;
                 }
                 else if (isP2 && pos.y < halfH)
@@ -396,6 +408,8 @@ namespace ValheimSplitscreen.Patches
                 {
                     pos.x -= halfW;
                     eventData.position = pos;
+                    var pp = eventData.pressPosition;
+                    if (pp.x >= halfW) { pp.x -= halfW; eventData.pressPosition = pp; }
                     _didRemap = true;
                 }
             }
@@ -409,6 +423,7 @@ namespace ValheimSplitscreen.Patches
             if (_didRemap)
             {
                 eventData.position = _savedPosition;
+                eventData.pressPosition = _savedPressPosition;
                 _didRemap = false;
             }
         }

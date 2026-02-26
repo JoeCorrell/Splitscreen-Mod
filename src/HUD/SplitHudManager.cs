@@ -107,9 +107,32 @@ namespace ValheimSplitscreen.HUD
             ConfigureAllCloneCanvases(_p2HudClone, p2Camera);
             DisableNonRenderingScripts(_p2HudClone);
 
+            // Force cloned HotkeyBars to clear P1's cached data so they refresh with P2's inventory
+            ClearClonedHotkeyBarData(_p2HudClone);
+
             _p2Updater = _p2HudClone.AddComponent<Player2HudUpdater>();
             _p2Updater.ConfigureMinimapMirror(Minimap.instance, _p2MinimapSmallClone);
             Debug.Log("[Splitscreen][P2HUD] Player 2 HUD created");
+        }
+
+        private static void ClearClonedHotkeyBarData(GameObject root)
+        {
+            var bars = root.GetComponentsInChildren<HotkeyBar>(true);
+            foreach (var bar in bars)
+            {
+                // Destroy existing icon children (they show P1's stale items)
+                for (int i = bar.transform.childCount - 1; i >= 0; i--)
+                    Destroy(bar.transform.GetChild(i).gameObject);
+                // Clear internal item list via reflection (field may be private)
+                var itemsField = typeof(HotkeyBar).GetField("m_items",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (itemsField != null)
+                {
+                    var list = itemsField.GetValue(bar) as System.Collections.IList;
+                    list?.Clear();
+                }
+                Debug.Log($"[Splitscreen][P2HUD] Cleared cloned HotkeyBar '{bar.gameObject.name}'");
+            }
         }
 
         private static GameObject TryCloneMinimapSmallRoot(Transform parent)
@@ -200,10 +223,11 @@ namespace ValheimSplitscreen.HUD
                 || script is Mask
                 || script is RectMask2D
                 || script is TMP_Text
-                || script is HotkeyBar;
+                || script is HotkeyBar
+                || script is Player2HudUpdater;
         }
 
-        private static void SetLayerRecursively(GameObject root, int layer)
+        public static void SetLayerRecursively(GameObject root, int layer)
         {
             if (root == null) return;
             var transforms = root.GetComponentsInChildren<Transform>(true);
@@ -235,9 +259,12 @@ namespace ValheimSplitscreen.HUD
 
     /// <summary>
     /// Updates selected HUD pieces in the cloned P2 HUD tree.
+    /// Handles health, stamina, eitr, hotbar, minimap, messages, status effects, food, and hover text.
     /// </summary>
     public class Player2HudUpdater : MonoBehaviour
     {
+        public static Player2HudUpdater Instance { get; private set; }
+
         private Image _healthBarFill;
         private Image _healthBarSlow;
         private Text _healthText;
@@ -255,6 +282,7 @@ namespace ValheimSplitscreen.HUD
         private bool _staticPanelsConfigured;
         private float _lastSearchTime;
         private float _lastHotbarSearchTime;
+        private int _searchAttempts;
         private float _lastMinimapConfigTime;
         private float _lastSourceMinimapSearchTime;
 
@@ -270,10 +298,35 @@ namespace ValheimSplitscreen.HUD
         private RectTransform _sourceShipMarker;
         private TMP_Text _sourceBiomeNameSmall;
 
+        // --- P2 Message Display ---
+        private TMP_Text _centerMessageText;
+        private TMP_Text _topLeftMessageText;
+        private Sprite _lastMessageIcon;
+        private float _centerMessageTimer;
+        private float _topLeftMessageTimer;
+        private const float MessageFadeTime = 4f;
+
+        // --- P2 Hover Text ---
+        private TMP_Text _hoverNameText;
+        private GameObject _crosshairObj;
+
+        // Rate-limit expensive reflection calls
+        private float _lastStatusEffectUpdate;
+        private float _lastFoodIconUpdate;
+        private const float StatusFoodUpdateInterval = 0.5f;
+
         private void Awake()
         {
+            Instance = this;
             _cloneHud = GetComponent<global::Hud>();
             _cloneMinimap = GetComponentInChildren<Minimap>(true);
+            FindMessageElements();
+            FindHoverElements();
+        }
+
+        private void OnDestroy()
+        {
+            if (Instance == this) Instance = null;
         }
 
         public void ConfigureMinimapMirror(Minimap sourceMinimap, GameObject mirrorSmallRoot)
@@ -283,11 +336,30 @@ namespace ValheimSplitscreen.HUD
             {
                 _mirrorMapImageSmall = FindRawImageByNameToken(_mirrorMinimapRoot.transform, "map");
                 _mirrorBiomeNameSmall = FindTmpTextByNameToken(_mirrorMinimapRoot.transform, "biome");
+
+                // Fallback: if token search failed, try finding any RawImage in the minimap clone
+                if (_mirrorMapImageSmall == null)
+                {
+                    var allRawImages = _mirrorMinimapRoot.GetComponentsInChildren<RawImage>(true);
+                    if (allRawImages.Length > 0)
+                    {
+                        _mirrorMapImageSmall = allRawImages[0];
+                        Debug.Log($"[Splitscreen][P2HUD] Minimap mirror: token search failed, using fallback RawImage '{_mirrorMapImageSmall.gameObject.name}'");
+                    }
+                }
+
+                Debug.Log($"[Splitscreen][P2HUD] Minimap mirror binding: root={_mirrorMinimapRoot.name}, mapImage={(_mirrorMapImageSmall != null ? _mirrorMapImageSmall.gameObject.name : "NULL")}, biome={(_mirrorBiomeNameSmall != null ? _mirrorBiomeNameSmall.gameObject.name : "NULL")}");
+            }
+            else
+            {
+                Debug.LogWarning("[Splitscreen][P2HUD] Minimap mirror root is null!");
             }
 
             BindSourceMinimap(sourceMinimap);
             TryBindMirrorMarkersByName();
             ConfigureMinimapVisibility();
+
+            Debug.Log($"[Splitscreen][P2HUD] Source minimap binding: mapImage={(_sourceMapImageSmall != null ? _sourceMapImageSmall.gameObject.name : "NULL")}, marker={(_sourceSmallMarker != null ? _sourceSmallMarker.gameObject.name : "NULL")}");
         }
 
         private void Update()
@@ -312,6 +384,20 @@ namespace ValheimSplitscreen.HUD
             UpdateEitrBar(p2);
             UpdateHotbar(p2);
             UpdateMinimapMirror();
+            UpdateMessages();
+            UpdateHoverText(p2);
+
+            // Rate-limit expensive reflection calls to reduce FPS impact
+            if (Time.time - _lastStatusEffectUpdate > StatusFoodUpdateInterval)
+            {
+                _lastStatusEffectUpdate = Time.time;
+                UpdateStatusEffects(p2);
+            }
+            if (Time.time - _lastFoodIconUpdate > StatusFoodUpdateInterval)
+            {
+                _lastFoodIconUpdate = Time.time;
+                UpdateFoodIcons(p2);
+            }
 
             if (Time.time - _lastMinimapConfigTime > 2f)
             {
@@ -337,14 +423,17 @@ namespace ValheimSplitscreen.HUD
             ConfigureStaticPanels();
             ConfigureMinimapVisibility();
 
-            if (_healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0))
+            TryBroadSearch();
+
+            // Initialize as soon as we find any element, or force after 3 attempts
+            bool foundSomething = _healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0);
+            int attempts = Mathf.RoundToInt(Time.time - _lastSearchTime);
+            if (foundSomething || _searchAttempts >= 3)
             {
                 _initialized = true;
-                return;
+                Debug.Log($"[Splitscreen][P2HUD] Initialized after {_searchAttempts} attempts: health={_healthBarFill != null}, hotbars={_hotkeyBars?.Length ?? 0}");
             }
-
-            TryBroadSearch();
-            _initialized = _healthBarFill != null || (_hotkeyBars != null && _hotkeyBars.Length > 0);
+            _searchAttempts++;
         }
 
         private void TryBroadSearch()
@@ -437,13 +526,11 @@ namespace ValheimSplitscreen.HUD
             SafeSetActive(_cloneHud.m_hidden, false);
             SafeSetActive(_cloneHud.m_pieceSelectionWindow, false);
 
-            if (_cloneHud.m_statusEffectListRoot != null) SafeSetActive(_cloneHud.m_statusEffectListRoot.gameObject, false);
-            if (_cloneHud.m_foodBarRoot != null) SafeSetActive(_cloneHud.m_foodBarRoot.gameObject, false);
+            // Keep status effects, food bar, and crosshair/hover ENABLED for P2
+            // They are updated each frame in UpdateStatusEffects, UpdateFoodIcons, UpdateHoverText
             if (_cloneHud.m_gpRoot != null) SafeSetActive(_cloneHud.m_gpRoot.gameObject, false);
             if (_cloneHud.m_loadingScreen != null) SafeSetActive(_cloneHud.m_loadingScreen.gameObject, false);
-            if (_cloneHud.m_crosshair != null) SafeSetActive(_cloneHud.m_crosshair.gameObject, false);
             if (_cloneHud.m_crosshairBow != null) SafeSetActive(_cloneHud.m_crosshairBow.gameObject, false);
-            if (_cloneHud.m_hoverName != null) SafeSetActive(_cloneHud.m_hoverName.gameObject, false);
             if (_cloneHud.m_damageScreen != null) SafeSetActive(_cloneHud.m_damageScreen.gameObject, false);
             if (_cloneHud.m_lavaWarningScreen != null) SafeSetActive(_cloneHud.m_lavaWarningScreen.gameObject, false);
 
@@ -452,43 +539,14 @@ namespace ValheimSplitscreen.HUD
 
         private void HideUnsupportedBranches()
         {
-            var keepRoots = new HashSet<Transform>();
-
-            CollectTopLevelRoot(_healthBarFill?.transform, keepRoots);
-            CollectTopLevelRoot(_healthBarSlow?.transform, keepRoots);
-            CollectTopLevelRoot(_staminaBarFill?.transform, keepRoots);
-            CollectTopLevelRoot(_staminaBarSlow?.transform, keepRoots);
-            CollectTopLevelRoot(_eitrBarFill?.transform, keepRoots);
-            CollectTopLevelRoot(_eitrBarSlow?.transform, keepRoots);
-
-            if (_hotkeyBars != null)
-            {
-                for (int i = 0; i < _hotkeyBars.Length; i++)
-                {
-                    CollectTopLevelRoot(_hotkeyBars[i]?.transform, keepRoots);
-                }
-            }
-
-            if (_cloneMinimap != null)
-            {
-                var minimapRoot = _cloneMinimap.m_smallRoot != null ? _cloneMinimap.m_smallRoot.transform : _cloneMinimap.transform;
-                CollectTopLevelRoot(minimapRoot, keepRoots);
-            }
-            if (_mirrorMinimapRoot != null)
-            {
-                CollectTopLevelRoot(_mirrorMinimapRoot.transform, keepRoots);
-            }
-
-            if (keepRoots.Count == 0)
-            {
-                return;
-            }
-
+            // Keep everything visible by default.
+            // ConfigureStaticPanels() will disable specific panels we don't need.
+            // Ensure all top-level children are active so the HUD root renders.
             for (int i = 0; i < transform.childCount; i++)
             {
-                var child = transform.GetChild(i);
-                child.gameObject.SetActive(keepRoots.Contains(child));
+                transform.GetChild(i).gameObject.SetActive(true);
             }
+            Debug.Log($"[Splitscreen][P2HUD] HideUnsupportedBranches: enabled {transform.childCount} top-level children");
         }
 
         private void CollectTopLevelRoot(Transform leaf, HashSet<Transform> roots)
@@ -573,6 +631,20 @@ namespace ValheimSplitscreen.HUD
         {
             if (_mirrorMinimapRoot == null)
             {
+                // Try to create mirror root if it doesn't exist yet
+                if (Time.time - _lastSourceMinimapSearchTime > 3f)
+                {
+                    _lastSourceMinimapSearchTime = Time.time;
+                    if (Minimap.instance != null && Minimap.instance.m_smallRoot != null)
+                    {
+                        _mirrorMinimapRoot = Instantiate(Minimap.instance.m_smallRoot, transform, false);
+                        _mirrorMinimapRoot.name = "P2_MinimapSmall_Retry";
+                        _mirrorMinimapRoot.SetActive(true);
+                        SplitHudManager.SetLayerRecursively(_mirrorMinimapRoot, SplitCameraManager.Player2HudLayer);
+                        ConfigureMinimapMirror(Minimap.instance, _mirrorMinimapRoot);
+                        Debug.Log("[Splitscreen][P2HUD] Created minimap mirror root on retry");
+                    }
+                }
                 return;
             }
 
@@ -581,12 +653,27 @@ namespace ValheimSplitscreen.HUD
                 _lastSourceMinimapSearchTime = Time.time;
                 BindSourceMinimap(Minimap.instance);
                 TryBindMirrorMarkersByName();
+                if (_mirrorMapImageSmall == null)
+                {
+                    // Re-search for RawImage in mirror
+                    var allRaw = _mirrorMinimapRoot.GetComponentsInChildren<RawImage>(true);
+                    if (allRaw.Length > 0)
+                    {
+                        _mirrorMapImageSmall = allRaw[0];
+                        Debug.Log($"[Splitscreen][P2HUD] Re-bound mirror RawImage: '{_mirrorMapImageSmall.gameObject.name}'");
+                    }
+                }
             }
 
             _mirrorMinimapRoot.SetActive(true);
 
             var p2 = SplitScreenManager.Instance?.PlayerManager?.Player2;
             var minimap = Minimap.instance;
+
+            if (SplitscreenLog.ShouldLog("Minimap.mirror", 10f))
+            {
+                SplitscreenLog.Log("Minimap", $"UpdateMirror: mirrorMap={(_mirrorMapImageSmall != null)}, sourceMap={(_sourceMapImageSmall != null)}, p2={p2 != null}, minimap={minimap != null}");
+            }
 
             // Copy map texture and material from P1's minimap
             if (_mirrorMapImageSmall != null && _sourceMapImageSmall != null)
@@ -748,6 +835,223 @@ namespace ValheimSplitscreen.HUD
                 _lastHotbarSearchTime = Time.time;
                 FindHotkeyBars();
             }
+        }
+
+        // =====================================================================
+        // P2 MESSAGE DISPLAY
+        // =====================================================================
+
+        private void FindMessageElements()
+        {
+            // Search the cloned HUD for text elements that can serve as message displays
+            var allTexts = GetComponentsInChildren<TMP_Text>(true);
+            foreach (var txt in allTexts)
+            {
+                string name = txt.gameObject.name.ToLowerInvariant();
+                if (name.Contains("message") && name.Contains("center") && _centerMessageText == null)
+                    _centerMessageText = txt;
+                else if ((name.Contains("message") && name.Contains("top")) && _topLeftMessageText == null)
+                    _topLeftMessageText = txt;
+            }
+
+            SplitscreenLog.Log("P2HUD", $"FindMessageElements: center={_centerMessageText != null}, topLeft={_topLeftMessageText != null}");
+        }
+
+        /// <summary>
+        /// Called by MessagePatches when Player 2 receives a message.
+        /// </summary>
+        public void ShowMessage(MessageHud.MessageType type, string msg, int amount, Sprite icon)
+        {
+            if (amount > 0) msg = $"{msg} x{amount}";
+            else if (amount < 0) msg = $"{msg} ({amount})";
+
+            if (type == MessageHud.MessageType.Center)
+            {
+                if (_centerMessageText != null)
+                {
+                    _centerMessageText.gameObject.SetActive(true);
+                    _centerMessageText.text = msg;
+                    _centerMessageTimer = MessageFadeTime;
+                }
+            }
+            else // TopLeft corner message
+            {
+                if (_topLeftMessageText != null)
+                {
+                    _topLeftMessageText.gameObject.SetActive(true);
+                    _topLeftMessageText.text = msg;
+                    _topLeftMessageTimer = MessageFadeTime;
+                }
+            }
+
+            _lastMessageIcon = icon;
+        }
+
+        private void UpdateMessages()
+        {
+            if (_centerMessageText != null && _centerMessageTimer > 0f)
+            {
+                _centerMessageTimer -= Time.deltaTime;
+                if (_centerMessageTimer <= 0f)
+                {
+                    _centerMessageText.text = "";
+                    _centerMessageText.gameObject.SetActive(false);
+                }
+                else if (_centerMessageTimer < 1f)
+                {
+                    // Fade out
+                    var c = _centerMessageText.color;
+                    c.a = _centerMessageTimer;
+                    _centerMessageText.color = c;
+                }
+                else
+                {
+                    var c = _centerMessageText.color;
+                    c.a = 1f;
+                    _centerMessageText.color = c;
+                }
+            }
+
+            if (_topLeftMessageText != null && _topLeftMessageTimer > 0f)
+            {
+                _topLeftMessageTimer -= Time.deltaTime;
+                if (_topLeftMessageTimer <= 0f)
+                {
+                    _topLeftMessageText.text = "";
+                    _topLeftMessageText.gameObject.SetActive(false);
+                }
+                else if (_topLeftMessageTimer < 1f)
+                {
+                    var c = _topLeftMessageText.color;
+                    c.a = _topLeftMessageTimer;
+                    _topLeftMessageText.color = c;
+                }
+                else
+                {
+                    var c = _topLeftMessageText.color;
+                    c.a = 1f;
+                    _topLeftMessageText.color = c;
+                }
+            }
+        }
+
+        // =====================================================================
+        // P2 HOVER TEXT + CROSSHAIR
+        // =====================================================================
+
+        private void FindHoverElements()
+        {
+            if (_cloneHud != null)
+            {
+                if (_cloneHud.m_hoverName != null)
+                    _hoverNameText = _cloneHud.m_hoverName.GetComponent<TMP_Text>();
+                if (_cloneHud.m_crosshair != null)
+                    _crosshairObj = _cloneHud.m_crosshair.gameObject;
+            }
+
+            if (_hoverNameText == null)
+            {
+                // Fallback: search by name
+                var allTexts = GetComponentsInChildren<TMP_Text>(true);
+                foreach (var txt in allTexts)
+                {
+                    if (txt.gameObject.name.ToLowerInvariant().Contains("hovername"))
+                    {
+                        _hoverNameText = txt;
+                        break;
+                    }
+                }
+            }
+
+            SplitscreenLog.Log("P2HUD", $"FindHoverElements: hoverText={_hoverNameText != null}, crosshair={_crosshairObj != null}");
+        }
+
+        private void UpdateHoverText(global::Player p2)
+        {
+            if (_hoverNameText == null) return;
+
+            // Temporarily set m_localPlayer to P2 to get correct hover info
+            string hoverText = null;
+            SplitscreenLog.ExecuteAsPlayer(p2, () =>
+            {
+                var hoverObj = p2.GetHoverObject();
+                if (hoverObj != null)
+                {
+                    var hoverable = hoverObj.GetComponentInParent<Hoverable>();
+                    if (hoverable != null)
+                    {
+                        try { hoverText = hoverable.GetHoverText(); }
+                        catch { /* Some hoverables may throw */ }
+                    }
+                }
+            });
+
+            if (!string.IsNullOrEmpty(hoverText))
+            {
+                _hoverNameText.gameObject.SetActive(true);
+                // Strip rich text formatting that may not render well
+                _hoverNameText.text = hoverText;
+            }
+            else
+            {
+                _hoverNameText.gameObject.SetActive(false);
+                _hoverNameText.text = "";
+            }
+        }
+
+        // =====================================================================
+        // P2 STATUS EFFECTS
+        // =====================================================================
+
+        private static readonly System.Reflection.MethodInfo _hudUpdateStatusEffects =
+            typeof(global::Hud).GetMethod("UpdateStatusEffects", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+
+        private void UpdateStatusEffects(global::Player p2)
+        {
+            if (_cloneHud == null) return;
+            if (_cloneHud.m_statusEffectListRoot == null) return;
+            if (_hudUpdateStatusEffects == null) return;
+
+            // Call Hud's status effect update with m_localPlayer swapped to P2
+            SplitscreenLog.ExecuteAsPlayer(p2, () =>
+            {
+                try
+                {
+                    var seEffects = p2.GetSEMan().GetStatusEffects();
+                    _hudUpdateStatusEffects.Invoke(_cloneHud, new object[] { seEffects });
+                }
+                catch
+                {
+                    // Keep robust — signature may differ across Valheim versions
+                }
+            });
+        }
+
+        // =====================================================================
+        // P2 FOOD ICONS
+        // =====================================================================
+
+        private static readonly System.Reflection.MethodInfo _hudUpdateFood =
+            typeof(global::Hud).GetMethod("UpdateFood", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+
+        private void UpdateFoodIcons(global::Player p2)
+        {
+            if (_cloneHud == null) return;
+            if (_cloneHud.m_foodBarRoot == null) return;
+            if (_hudUpdateFood == null) return;
+
+            // Call Hud's food update with m_localPlayer set to P2
+            SplitscreenLog.ExecuteAsPlayer(p2, () =>
+            {
+                try
+                {
+                    _hudUpdateFood.Invoke(_cloneHud, new object[] { p2 });
+                }
+                catch
+                {
+                    // Keep robust — signature may differ across Valheim versions
+                }
+            });
         }
 
         private Image FindImageByPath(params string[] paths)
