@@ -206,7 +206,9 @@ namespace ValheimSplitscreen.Patches
             if (horizontal)
             {
                 float halfH = Screen.height / 2f;
-                if (isP1 && pos.y >= halfH)
+                // Horizontal split is fixed as P2=top, P1=bottom.
+                // Only the top half needs Y remapping into RT-local coordinates.
+                if (isP2 && pos.y >= halfH)
                 {
                     pos.y -= halfH;
                     eventData.position = pos;

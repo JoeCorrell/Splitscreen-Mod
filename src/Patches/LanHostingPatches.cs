@@ -38,6 +38,7 @@ namespace ValheimSplitscreen.Patches
 
             // Only apply when splitscreen is armed, in menu split, or active
             if (mgr.State != SplitscreenState.MenuSplit &&
+                mgr.State != SplitscreenState.AwaitingP2Character &&
                 mgr.State != SplitscreenState.Armed &&
                 mgr.State != SplitscreenState.Active) return;
 

@@ -1,75 +1,71 @@
 using HarmonyLib;
-using UnityEngine;
 using ValheimSplitscreen.Core;
-using ValheimSplitscreen.Input;
 
 namespace ValheimSplitscreen.Patches
 {
     /// <summary>
-    /// Patches for PlayerController to route input correctly in splitscreen.
-    ///
-    /// In normal Valheim, PlayerController reads from ZInput (global) and applies to its Player.
-    /// In splitscreen, we need:
-    /// - Player 1's controller reads from Gamepad 0
-    /// - Player 2's controller reads from Gamepad 1
-    ///
-    /// Since Player 2's controls are driven by SplitPlayerManager.UpdatePlayer2Controls(),
-    /// we need to prevent the default PlayerController on Player 2 from reading global input.
+    /// Runs vanilla PlayerController for P2 by swapping m_localPlayer context
+    /// during P2 controller updates. This preserves native bindings/layout logic.
     /// </summary>
     [HarmonyPatch]
     public static class PlayerControllerPatches
     {
-        private static bool _loggedP2Skip;
-
-        /// <summary>
-        /// Skip FixedUpdate for Player 2's PlayerController.
-        /// We handle Player 2's input ourselves in SplitPlayerManager.
-        /// </summary>
         [HarmonyPatch(typeof(PlayerController), "FixedUpdate")]
         [HarmonyPrefix]
-        public static bool FixedUpdate_Prefix(PlayerController __instance)
+        public static void FixedUpdate_Prefix(PlayerController __instance, out global::Player __state)
         {
-            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return true;
+            __state = null;
+            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
 
-            // Get the Player component on this same object
+            var mgr = SplitScreenManager.Instance.PlayerManager;
+            if (mgr == null) return;
+
             var player = __instance.GetComponent<global::Player>();
-            if (player == null) return true;
+            if (player == null || !mgr.IsPlayer2(player)) return;
 
-            var playerMgr = SplitScreenManager.Instance.PlayerManager;
-            if (playerMgr != null && playerMgr.IsPlayer2(player))
-            {
-                if (!_loggedP2Skip)
-                {
-                    Debug.Log("[Splitscreen][Patch] Skipping PlayerController.FixedUpdate for Player 2 (we drive P2 controls ourselves)");
-                    _loggedP2Skip = true;
-                }
-                return false;
-            }
-
-            // Player 1 proceeds with normal FixedUpdate
-            return true;
+            __state = global::Player.m_localPlayer;
+            global::Player.m_localPlayer = player;
+            mgr.IsUpdatingPlayer2 = true;
         }
 
-        /// <summary>
-        /// Skip LateUpdate for Player 2's PlayerController (camera look handling).
-        /// We handle this in SplitPlayerManager.
-        /// </summary>
+        [HarmonyPatch(typeof(PlayerController), "FixedUpdate")]
+        [HarmonyPostfix]
+        public static void FixedUpdate_Postfix(global::Player __state)
+        {
+            if (__state == null) return;
+
+            global::Player.m_localPlayer = __state;
+            var mgr = SplitScreenManager.Instance?.PlayerManager;
+            if (mgr != null) mgr.IsUpdatingPlayer2 = false;
+        }
+
         [HarmonyPatch(typeof(PlayerController), "LateUpdate")]
         [HarmonyPrefix]
-        public static bool LateUpdate_Prefix(PlayerController __instance)
+        public static void LateUpdate_Prefix(PlayerController __instance, out global::Player __state)
         {
-            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return true;
+            __state = null;
+            if (!SplitScreenManager.Instance?.SplitscreenActive ?? true) return;
+
+            var mgr = SplitScreenManager.Instance.PlayerManager;
+            if (mgr == null) return;
 
             var player = __instance.GetComponent<global::Player>();
-            if (player == null) return true;
+            if (player == null || !mgr.IsPlayer2(player)) return;
 
-            var playerMgr = SplitScreenManager.Instance.PlayerManager;
-            if (playerMgr != null && playerMgr.IsPlayer2(player))
-            {
-                return false; // Skip - we handle Player 2's look in our update
-            }
+            __state = global::Player.m_localPlayer;
+            global::Player.m_localPlayer = player;
+            mgr.IsUpdatingPlayer2 = true;
+        }
 
-            return true;
+        [HarmonyPatch(typeof(PlayerController), "LateUpdate")]
+        [HarmonyPostfix]
+        public static void LateUpdate_Postfix(global::Player __state)
+        {
+            if (__state == null) return;
+
+            global::Player.m_localPlayer = __state;
+            var mgr = SplitScreenManager.Instance?.PlayerManager;
+            if (mgr != null) mgr.IsUpdatingPlayer2 = false;
         }
     }
 }

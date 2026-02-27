@@ -120,9 +120,9 @@ namespace ValheimSplitscreen.Camera
             Debug.Log($"[Splitscreen][Camera]   cullingMask={_originalCamera.cullingMask}");
             Debug.Log($"[Splitscreen][Camera]   enabled={_originalCamera.enabled}");
 
-            var config = SplitscreenPlugin.Instance.SplitConfig;
-            bool horizontal = config.Orientation.Value == SplitOrientation.Horizontal;
-            Debug.Log($"[Splitscreen][Camera] Orientation: {(horizontal ? "Horizontal (top/bottom)" : "Vertical (left/right)")}");
+            // New pipeline: always horizontal split with P2 on top, P1 on bottom.
+            bool horizontal = true;
+            Debug.Log("[Splitscreen][Camera] Orientation: Horizontal (fixed) P2=top, P1=bottom");
             Debug.Log($"[Splitscreen][Camera] Screen: {Screen.width}x{Screen.height}");
 
             // Step A: Create RenderTextures
@@ -853,12 +853,12 @@ namespace ValheimSplitscreen.Camera
 
             if (_horizontal)
             {
-                int p1Height = Mathf.Clamp(_p1RT.height, 1, Screen.height);
-                int p2Height = Mathf.Max(1, Screen.height - p1Height);
-                // P1 = top half
-                GUI.DrawTexture(new Rect(0, 0, Screen.width, p1Height), _p1RT, ScaleMode.StretchToFill, alphaBlend: false);
-                // P2 = bottom half
-                GUI.DrawTexture(new Rect(0, p1Height, Screen.width, p2Height), _p2RT, ScaleMode.StretchToFill, alphaBlend: false);
+                int p2Height = Mathf.Clamp(_p2RT.height, 1, Screen.height);
+                int p1Height = Mathf.Max(1, Screen.height - p2Height);
+                // P2 = top half
+                GUI.DrawTexture(new Rect(0, 0, Screen.width, p2Height), _p2RT, ScaleMode.StretchToFill, alphaBlend: false);
+                // P1 = bottom half
+                GUI.DrawTexture(new Rect(0, p2Height, Screen.width, p1Height), _p1RT, ScaleMode.StretchToFill, alphaBlend: false);
             }
             else
             {
@@ -880,7 +880,7 @@ namespace ValheimSplitscreen.Camera
 
             if (_horizontal)
             {
-                int y = Mathf.Clamp(_p1RT.height, 1, Screen.height - 1);
+                int y = Mathf.Clamp(_p2RT.height, 1, Screen.height - 1);
                 GUI.DrawTexture(new Rect(0, y - 1, Screen.width, 3), _dividerTex);
             }
             else

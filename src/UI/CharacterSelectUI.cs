@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using TMPro;
@@ -42,12 +43,21 @@ namespace ValheimSplitscreen.UI
         private Button _leftButton;
         private Button _rightButton;
 
+        // P2 UI camera — viewport rect confines clone to P2's screen half
+        private GameObject _p2UICamObj;
+        private UnityEngine.Camera _p2UICam;
+
         // Cursor state to restore on close (only used in in-game mode)
         private CursorLockMode _prevCursorLock;
         private bool _prevCursorVisible;
 
         // 3D character preview: override FejdStartup's camera and character model
         private bool _overridingCamera;
+
+        // P2 world camera — renders the 3D scene from the character select angle
+        // in P2's viewport, so P2 sees campfire + character while P1 sees the menu
+        private GameObject _p2WorldCamObj;
+        private UnityEngine.Camera _p2WorldCam;
 
         // Gamepad input for P2 character select (menu context — SplitInputManager isn't active yet)
         private ValheimSplitscreen.Input.PlayerInputState _p2MenuInput = new ValheimSplitscreen.Input.PlayerInputState();
@@ -85,12 +95,15 @@ namespace ValheimSplitscreen.UI
         private void Awake()
         {
             Instance = this;
+            Debug.Log("[Splitscreen][CharSelect] Awake");
         }
 
         public void Show(Action<PlayerProfile> onSelected, Action onCancelled)
         {
             Debug.Log($"[Splitscreen][CharSelect] Show() called — IsMainMenuMode={IsMainMenuMode}, IsMenuSplitMode={IsMenuSplitMode}");
 
+            Debug.Log($"[Splitscreen][CharSelect] Show() environment: screen={Screen.width}x{Screen.height}, " +
+                $"fejd={(FejdStartup.instance != null ? "present" : "null")}, eventSystem={(EventSystem.current != null ? EventSystem.current.name : "null")}");
             // Clean up previous state if Show() is called while already visible
             if (IsVisible)
             {
@@ -133,9 +146,11 @@ namespace ValheimSplitscreen.UI
                 _useFallbackIMGUI = true;
             }
 
-            // Disable EventSystem input module to prevent P2's gamepad from
-            // also navigating P1's menu buttons via Unity's EventSystem
-            DisableEventSystemInput();
+            // In menu split mode, do NOT disable EventSystem — P1 still needs
+            // mouse input for their menu. P2 input is handled via gamepad polling
+            // in Update(). In non-menu-split mode, disable to isolate P2.
+            if (!IsMenuSplitMode)
+                DisableEventSystemInput();
         }
 
         public void Hide()
@@ -162,6 +177,13 @@ namespace ValheimSplitscreen.UI
                 _leftButton = null;
                 _rightButton = null;
             }
+            if (_p2UICamObj != null)
+            {
+                Destroy(_p2UICamObj);
+                _p2UICamObj = null;
+                _p2UICam = null;
+            }
+            Debug.Log("[Splitscreen][CharSelect][Diag] Cleared cloned canvas and P2 UI camera");
             Debug.Log("[Splitscreen][CharSelect] Hidden and cleaned up");
         }
 
@@ -275,15 +297,30 @@ namespace ValheimSplitscreen.UI
         /// </summary>
         public void OverrideCameraFromPatch(FejdStartup fejd)
         {
-            if (!_overridingCamera || fejd == null) return;
+            if (fejd == null) return;
+
+            // If we have a P2 world camera, keep it at the character marker
+            if (_p2WorldCam != null)
+            {
+                var marker = _fejdCameraMarkerChar?.GetValue(fejd) as Transform;
+                if (marker != null)
+                {
+                    _p2WorldCamObj.transform.position = marker.position;
+                    _p2WorldCamObj.transform.rotation = marker.rotation;
+                }
+                return; // don't override Main Camera — P1 keeps their view
+            }
+
+            // Legacy: override Main Camera directly (non-menu-split mode)
+            if (!_overridingCamera) return;
 
             var camObj = _fejdMainCamera?.GetValue(fejd) as GameObject;
-            var marker = _fejdCameraMarkerChar?.GetValue(fejd) as Transform;
+            var markerC = _fejdCameraMarkerChar?.GetValue(fejd) as Transform;
 
-            if (camObj != null && marker != null)
+            if (camObj != null && markerC != null)
             {
-                camObj.transform.position = marker.position;
-                camObj.transform.rotation = marker.rotation;
+                camObj.transform.position = markerC.position;
+                camObj.transform.rotation = markerC.rotation;
             }
         }
 
@@ -291,73 +328,210 @@ namespace ValheimSplitscreen.UI
 
         private bool CreateClonedPanel()
         {
+            Debug.Log("[Splitscreen][CharSelect] === CreateClonedPanel START ===");
+
             var fejd = FejdStartup.instance;
             if (fejd == null)
             {
-                Debug.Log("[Splitscreen][CharSelect] FejdStartup.instance is null (probably in-game)");
+                Debug.LogError("[Splitscreen][CharSelect] FAIL: FejdStartup.instance is null");
                 return false;
             }
 
             Canvas sourceCanvas = FindRootMenuCanvas(fejd);
             if (sourceCanvas == null)
             {
-                Debug.LogWarning("[Splitscreen][CharSelect] Could not find root menu canvas");
+                Debug.LogError("[Splitscreen][CharSelect] FAIL: Could not find root menu canvas");
                 return false;
             }
 
-            Debug.Log($"[Splitscreen][CharSelect] Cloning full canvas: '{sourceCanvas.gameObject.name}', children={sourceCanvas.transform.childCount}");
+            Debug.Log($"[Splitscreen][CharSelect] Source canvas: '{sourceCanvas.gameObject.name}', renderMode={sourceCanvas.renderMode}");
+            LogCanvasDetails(sourceCanvas, "source_before_clone");
 
-            // Clone the entire canvas hierarchy to get the native game UI look.
-            // Set IsCloning flag so Harmony prefix skips FejdStartup.Awake on the clone
-            // (prevents the clone from clobbering FejdStartup.instance).
+            // Deactivate source before cloning to prevent Awake/OnEnable from
+            // firing on clone components (avoids ObjectDB NullRef, UnifiedPopup
+            // duplicate errors, etc.)
+            bool wasActive = sourceCanvas.gameObject.activeSelf;
+            sourceCanvas.gameObject.SetActive(false);
             IsCloning = true;
             _canvasRoot = Instantiate(sourceCanvas.gameObject);
             IsCloning = false;
+            sourceCanvas.gameObject.SetActive(wasActive);
+
             _canvasRoot.name = "P2_CharSelectCanvas";
             _canvasRoot.transform.SetParent(null, false);
             DontDestroyOnLoad(_canvasRoot);
+            Debug.Log($"[Splitscreen][CharSelect] Cloned canvas (inactive), FejdStartup.instance valid: {FejdStartup.instance != null}");
+            LogCloneTreeStats("clone_inactive");
 
-            // Strip game scripts to avoid singleton conflicts
+            // Strip scripts while clone is still inactive — prevents any
+            // remaining MonoBehaviours from running when we activate
             StripScripts(_canvasRoot);
-            DisableButtonTips(_canvasRoot);
 
-            // Undo P1 menu confinement structure if it was included in the clone
-            UndoP1ConfinementInClone();
+            // Create P2 UI camera with viewport rect for P2's half.
+            // This is the key change from the old RectMask2D approach:
+            // a camera viewport reliably clips ALL rendering (including
+            // nested sub-canvases) to the specified screen region.
+            _p2UICamObj = new GameObject("P2_UICamera");
+            DontDestroyOnLoad(_p2UICamObj);
+            _p2UICam = _p2UICamObj.AddComponent<UnityEngine.Camera>();
+            _p2UICam.clearFlags = CameraClearFlags.Depth;
+            _p2UICam.cullingMask = BuildLayerMask(_canvasRoot);
+            _p2UICam.depth = 51; // above P1's UI camera (depth 50)
+            _p2UICam.orthographic = true;
+            _p2UICam.nearClipPlane = 0.1f;
+            _p2UICam.farClipPlane = 1000f;
 
-            // Configure canvas as ScreenSpaceOverlay above the game menu
+            bool horizontal = MenuSplitController.Instance?.IsHorizontal ?? true;
+            if (horizontal)
+                _p2UICam.rect = new Rect(0, 0.5f, 1, 0.5f); // top half (P2)
+            else
+                _p2UICam.rect = new Rect(0.5f, 0, 0.5f, 1); // right half
+
+            Debug.Log($"[Splitscreen][CharSelect] Created P2_UICamera: viewport={_p2UICam.rect}");
+
+            // Set clone canvas to ScreenSpaceCamera so it renders only in P2's viewport
             _canvas = _canvasRoot.GetComponent<Canvas>();
-            if (_canvas != null)
+            if (_canvas == null)
             {
-                _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-                _canvas.sortingOrder = MenuSplitController.CharSelectSortOrder;
+                Debug.LogError("[Splitscreen][CharSelect] FAIL: Clone has no Canvas component!");
+                return false;
             }
+            LogCanvasDetails(_canvas, "clone_before_assign_camera");
+            _canvas.renderMode = RenderMode.ScreenSpaceCamera;
+            _canvas.worldCamera = _p2UICam;
+            _canvas.planeDistance = 1f;
+            ConfigureCloneCanvasScalers();
+            Debug.Log($"[Splitscreen][CharSelect] Clone canvas set to ScreenSpaceCamera with P2_UICamera " +
+                $"(planeDistance={_canvas.planeDistance}, camNear={_p2UICam.nearClipPlane}, camFar={_p2UICam.farClipPlane})");
+            LogCanvasDetails(_canvas, "clone_after_assign_camera");
 
-            // Keep the source CanvasScaler (ScaleWithScreenSize matching the game)
-
-            // Clip the clone to P2's half using a RectMask2D container
-            ClipToP2Half();
+            // Now activate the clone — scripts are already stripped so nothing bad fires
+            _canvasRoot.SetActive(true);
+            LogCloneTreeStats("clone_active_immediate");
+            LogCameraDetails(_p2UICam, "p2_ui_cam_immediate");
 
             // Activate only the character select panel, hide everything else
-            ActivateCharSelectOnly(_canvasRoot);
+            Transform charSelectPanel = ActivateCharSelectOnly(_canvasRoot);
+            if (charSelectPanel == null)
+            {
+                Debug.LogError("[Splitscreen][CharSelect] FAIL: Character select panel not found in clone");
+                return false;
+            }
 
-            // Wire up carousel and bottom buttons for P2
-            WireUpCarousel(_canvasRoot);
-            WireUpBottomButtons(_canvasRoot);
-
-            // Update title for P2
-            UpdateTitleForP2(_canvasRoot);
-
-            // Position the character select content lower in P2's half
-            PositionContentLower(_canvasRoot);
-
-            // Show initial character
+            WireUpCarousel(charSelectPanel.gameObject);
+            WireUpBottomButtons(charSelectPanel.gameObject);
+            DisableButtonTips(_canvasRoot);
+            HideChangelogInClone(_canvasRoot);
+            FixCanvasGroupsForInteraction(charSelectPanel.gameObject);
+            EnsureGraphicRaycaster();
+            EnsureButtonInteractability(charSelectPanel.gameObject);
             UpdateCharacterDisplay();
+            if (IsMenuSplitMode)
+                StartCharacterPreviewWithP2Camera();
+            else
+                StartCharacterPreview();
+            StartCoroutine(LogCloneStateNextFrames(charSelectPanel));
 
-            // Start 3D character preview (camera override + character model)
-            StartCharacterPreview();
-
-            Debug.Log($"[Splitscreen][CharSelect] Full canvas clone created, {_profiles.Count} characters available");
+            Debug.Log($"[Splitscreen][CharSelect] === CreateClonedPanel END — {_profiles.Count} characters available ===");
             return true;
+        }
+
+        /// <summary>Log hierarchy to Debug.Log for diagnostics.</summary>
+        private static void LogHierarchy(Transform root, int maxDepth, int maxChildrenPerLevel)
+        {
+            LogHierarchyRecursive(root, 0, maxDepth, maxChildrenPerLevel);
+        }
+
+        private static void LogHierarchyRecursive(Transform t, int depth, int maxDepth, int maxChildren)
+        {
+            if (depth > maxDepth) return;
+            string indent = new string(' ', depth * 2);
+            var rt = t.GetComponent<RectTransform>();
+            string rtInfo = rt != null
+                ? $" anchors=({rt.anchorMin.x:F2},{rt.anchorMin.y:F2})-({rt.anchorMax.x:F2},{rt.anchorMax.y:F2})"
+                : "";
+            string maskInfo = t.GetComponent<RectMask2D>() != null ? " [MASK]" : "";
+            Debug.Log($"[Splitscreen][Hierarchy] {indent}{t.name} active={t.gameObject.activeSelf}{rtInfo}{maskInfo} children={t.childCount}");
+            int limit = Mathf.Min(t.childCount, maxChildren);
+            for (int i = 0; i < limit; i++)
+                LogHierarchyRecursive(t.GetChild(i), depth + 1, maxDepth, maxChildren);
+            if (t.childCount > limit)
+                Debug.Log($"[Splitscreen][Hierarchy] {indent}  ... and {t.childCount - limit} more");
+        }
+        private static int BuildLayerMask(GameObject root)
+        {
+            if (root == null) return 1 << 5;
+
+            int mask = 0;
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                mask |= 1 << transforms[i].gameObject.layer;
+            }
+
+            mask |= 1 << 5; // UI layer fallback
+            return mask;
+        }
+
+        private void ConfigureCloneCanvasScalers()
+        {
+            if (_canvasRoot == null) return;
+
+            bool horizontal = MenuSplitController.Instance?.IsHorizontal ?? true;
+
+            var scalers = _canvasRoot.GetComponentsInChildren<CanvasScaler>(true);
+            if (scalers == null || scalers.Length == 0)
+            {
+                Debug.Log("[Splitscreen][CharSelect] Clone has no CanvasScaler components");
+                return;
+            }
+
+            for (int i = 0; i < scalers.Length; i++)
+            {
+                var scaler = scalers[i];
+                if (scaler == null) continue;
+
+                var oldMode = scaler.uiScaleMode;
+                var oldRef = scaler.referenceResolution;
+
+                if (oldMode == CanvasScaler.ScaleMode.ScaleWithScreenSize)
+                {
+                    // Already configured for split by MenuSplitController (inherited
+                    // from the P1 canvas we cloned). Just ensure matchWidthOrHeight
+                    // is correct — do NOT double the reference again.
+                    if (horizontal)
+                        scaler.matchWidthOrHeight = 1f;
+                    else
+                        scaler.matchWidthOrHeight = 0f;
+
+                    Debug.Log(
+                        $"[Splitscreen][CharSelect] Clone scaler '{scaler.name}' already ScaleWithScreenSize — " +
+                        $"kept ref={oldRef.x:F0}x{oldRef.y:F0}, set match={scaler.matchWidthOrHeight:F2}");
+                }
+                else
+                {
+                    // Original scaler (e.g. ConstantPixelSize) — switch to
+                    // ScaleWithScreenSize and double the split dimension.
+                    scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                    var newRef = oldRef;
+                    if (horizontal)
+                    {
+                        newRef.y *= 2f;
+                        scaler.matchWidthOrHeight = 1f;
+                    }
+                    else
+                    {
+                        newRef.x *= 2f;
+                        scaler.matchWidthOrHeight = 0f;
+                    }
+                    scaler.referenceResolution = newRef;
+
+                    Debug.Log(
+                        $"[Splitscreen][CharSelect] Adjusted clone CanvasScaler '{scaler.name}': " +
+                        $"mode={oldMode}->{scaler.uiScaleMode}, ref={oldRef.x:F0}x{oldRef.y:F0}->{newRef.x:F0}x{newRef.y:F0}, " +
+                        $"matchMode={scaler.screenMatchMode}, match={scaler.matchWidthOrHeight:F2}");
+                }
+            }
         }
 
         private Canvas FindRootMenuCanvas(FejdStartup fejd)
@@ -386,67 +560,11 @@ namespace ValheimSplitscreen.UI
             return null;
         }
 
-        /// <summary>
-        /// If MenuSplitController confined the game menu before we cloned it,
-        /// the clone contains a P1_MenuClip wrapper. Undo that so the clone
-        /// has a clean hierarchy for our own P2 clipping.
-        /// </summary>
-        private void UndoP1ConfinementInClone()
-        {
-            if (_canvasRoot == null) return;
-            var p1Clip = _canvasRoot.transform.Find("P1_MenuClip");
-            if (p1Clip == null) return;
-
-            Debug.Log($"[Splitscreen][CharSelect] Undoing P1_MenuClip in clone ({p1Clip.childCount} children)");
-            var children = new List<Transform>();
-            for (int i = 0; i < p1Clip.childCount; i++)
-                children.Add(p1Clip.GetChild(i));
-            foreach (var c in children)
-                c.SetParent(_canvasRoot.transform, false);
-            Destroy(p1Clip.gameObject);
-        }
-
-        /// <summary>
-        /// Creates a RectMask2D clip container anchored to P2's half,
-        /// then reparents all existing canvas children under it.
-        /// This confines the cloned UI to P2's screen area.
-        /// </summary>
-        private void ClipToP2Half()
-        {
-            // Create clip container
-            var clipObj = new GameObject("P2_HalfClip");
-            clipObj.transform.SetParent(_canvasRoot.transform, false);
-            var clipRT = clipObj.AddComponent<RectTransform>();
-            PositionInP2Half(clipRT);
-            clipObj.AddComponent<RectMask2D>();
-
-            // Semi-transparent background so 3D scene peeks through behind the UI
-            var bgObj = new GameObject("DimBackground");
-            bgObj.transform.SetParent(clipObj.transform, false);
-            var bgImage = bgObj.AddComponent<Image>();
-            bgImage.color = new Color(0f, 0f, 0.02f, 0.45f);
-            bgImage.raycastTarget = false;
-            var bgRT = bgObj.GetComponent<RectTransform>();
-            bgRT.anchorMin = Vector2.zero;
-            bgRT.anchorMax = Vector2.one;
-            bgRT.offsetMin = Vector2.zero;
-            bgRT.offsetMax = Vector2.zero;
-
-            // Collect existing children (skip our clip container)
-            var children = new List<Transform>();
-            for (int i = 0; i < _canvasRoot.transform.childCount; i++)
-            {
-                var child = _canvasRoot.transform.GetChild(i);
-                if (child.gameObject != clipObj)
-                    children.Add(child);
-            }
-
-            // Reparent all children under the clip container
-            foreach (var child in children)
-                child.SetParent(clipObj.transform, false);
-
-            Debug.Log($"[Splitscreen][CharSelect] Clipped {children.Count} children to P2 half");
-        }
+        // NOTE: UndoP1ConfinementInClone, UnwrapCloneWrapperToCanvasRoot, and
+        // ClipToP2Half have been removed. The old approach used RectMask2D containers
+        // (P1_MenuClip/P1_InnerFull/P2_HalfClip) which failed to clip across nested
+        // Canvas boundaries. The new approach uses ScreenSpaceCamera with viewport rects
+        // which reliably confines all rendering to the target screen region.
 
         /// <summary>
         /// In the cloned hierarchy, hide everything except the path from
@@ -454,7 +572,7 @@ namespace ValheimSplitscreen.UI
         /// siblings that aren't in the path — this catches MainMenu, Logo,
         /// StartGame, etc. at any nesting depth.
         /// </summary>
-        private void ActivateCharSelectOnly(GameObject root)
+        private Transform ActivateCharSelectOnly(GameObject root)
         {
             var transforms = root.GetComponentsInChildren<Transform>(true);
 
@@ -484,7 +602,7 @@ namespace ValheimSplitscreen.UI
             if (charSelectPanel == null)
             {
                 Debug.LogError("[Splitscreen][CharSelect] Could not find character select panel at all!");
-                return;
+                return null;
             }
 
             // Build set of transforms in the path from CharacterSelection to root
@@ -507,7 +625,7 @@ namespace ValheimSplitscreen.UI
                 {
                     var sibling = parent.GetChild(i);
                     if (enablePath.Contains(sibling)) continue;
-                    if (sibling.name == "DimBackground" || sibling.name == "P2_HalfClip") continue;
+                    if (sibling.name == "DimBackground") continue;
 
                     if (sibling.gameObject.activeSelf)
                     {
@@ -526,6 +644,7 @@ namespace ValheimSplitscreen.UI
                 ancestor = ancestor.parent;
             }
             Debug.Log($"[Splitscreen][CharSelect] Activated character select panel: '{charSelectPanel.name}'");
+            LogPanelVisibility(charSelectPanel, "activate_char_select_only");
 
             // Hide sub-panels that should stay hidden even inside char select
             foreach (var t in transforms)
@@ -536,6 +655,8 @@ namespace ValheimSplitscreen.UI
                     t.gameObject.SetActive(false);
                 }
             }
+
+            return charSelectPanel;
         }
 
         private Transform FindCharSelectTransform(GameObject root, Transform[] transforms)
@@ -556,23 +677,28 @@ namespace ValheimSplitscreen.UI
         private void WireUpCarousel(GameObject panelClone)
         {
             var buttons = panelClone.GetComponentsInChildren<Button>(true);
+            bool wiredLeft = false;
+            bool wiredRight = false;
             foreach (var btn in buttons)
             {
+                if (!btn.gameObject.activeInHierarchy) continue;
                 string name = btn.gameObject.name;
 
-                if (name == "Left")
+                if (!wiredLeft && name == "Left")
                 {
                     _leftButton = btn;
                     btn.onClick = new Button.ButtonClickedEvent();
                     btn.onClick.AddListener(OnLeftClicked);
                     Debug.Log("[Splitscreen][CharSelect] Wired Left arrow button");
+                    wiredLeft = true;
                 }
-                else if (name == "Right")
+                else if (!wiredRight && name == "Right")
                 {
                     _rightButton = btn;
                     btn.onClick = new Button.ButtonClickedEvent();
                     btn.onClick.AddListener(OnRightClicked);
                     Debug.Log("[Splitscreen][CharSelect] Wired Right arrow button");
+                    wiredRight = true;
                 }
             }
 
@@ -595,36 +721,40 @@ namespace ValheimSplitscreen.UI
         private void WireUpBottomButtons(GameObject panelClone)
         {
             var buttons = panelClone.GetComponentsInChildren<Button>(true);
+            bool wiredStart = false;
+            bool wiredBack = false;
+            bool wiredNew = false;
+            bool wiredNewBig = false;
             foreach (var btn in buttons)
             {
+                if (!btn.gameObject.activeInHierarchy) continue;
                 string name = btn.gameObject.name;
 
-                if (name == "Start")
+                if (!wiredStart && name == "Start")
                 {
                     btn.onClick = new Button.ButtonClickedEvent();
                     btn.onClick.AddListener(OnStartClicked);
-                    SetButtonText(btn, "Select");
-                    Debug.Log("[Splitscreen][CharSelect] Wired Start -> Select button");
+                    Debug.Log("[Splitscreen][CharSelect] Wired Start button");
+                    wiredStart = true;
                 }
-                else if (name == "Back")
+                else if (!wiredBack && name == "Back")
                 {
                     btn.onClick = new Button.ButtonClickedEvent();
                     btn.onClick.AddListener(OnBackClicked);
                     Debug.Log("[Splitscreen][CharSelect] Wired Back button");
+                    wiredBack = true;
                 }
-                else if (name == "New" || name == "New_big")
+                else if ((!wiredNew && name == "New") || (!wiredNewBig && name == "New_big"))
                 {
                     btn.onClick = new Button.ButtonClickedEvent();
                     btn.onClick.AddListener(OnNewClicked);
                     Debug.Log($"[Splitscreen][CharSelect] Wired {name} button");
-                }
-                else if (name == "Remove" || name == "ManageSaves")
-                {
-                    // Disable these for P2 (too complex)
-                    btn.gameObject.SetActive(false);
-                    Debug.Log($"[Splitscreen][CharSelect] Hidden {name} button");
+                    if (name == "New") wiredNew = true;
+                    if (name == "New_big") wiredNewBig = true;
                 }
             }
+
+            Debug.Log($"[Splitscreen][CharSelect][Diag] Button wiring summary: start={wiredStart}, back={wiredBack}, new={wiredNew}, newBig={wiredNewBig}");
         }
 
         private void UpdateTitleForP2(GameObject panelClone)
@@ -640,53 +770,41 @@ namespace ValheimSplitscreen.UI
             }
         }
 
-        private void PositionInP2Half(RectTransform rt)
-        {
-            bool horizontal = MenuSplitController.Instance?.IsHorizontal ?? true;
-
-            if (horizontal)
-            {
-                rt.anchorMin = new Vector2(0, 0);
-                rt.anchorMax = new Vector2(1, 0.5f);
-            }
-            else
-            {
-                rt.anchorMin = new Vector2(0.5f, 0);
-                rt.anchorMax = new Vector2(1, 1);
-            }
-            rt.offsetMin = Vector2.zero;
-            rt.offsetMax = Vector2.zero;
-            rt.pivot = new Vector2(0.5f, 0.5f);
-        }
-
         /// <summary>
         /// Move the active character select panel lower in P2's half so it's not
         /// floating in the center. Adjusts the anchoredPosition downward.
         /// </summary>
+        private void PositionContentLower(Transform charSelectPanel)
+        {
+            if (charSelectPanel == null) return;
+            var rt = charSelectPanel.GetComponent<RectTransform>();
+            if (rt == null) return;
+
+            // Anchor panel into the lower area so it fits better in a half-screen viewport.
+            rt.anchorMin = new Vector2(0f, 0f);
+            rt.anchorMax = new Vector2(1f, 0.85f);
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+            Debug.Log($"[Splitscreen][CharSelect] Repositioned '{charSelectPanel.name}' to lower area");
+        }
+
+        // Deprecated root-scan helper kept for compatibility with existing call sites, if any.
         private void PositionContentLower(GameObject root)
         {
-            // Find the active character select panel
+            if (root == null) return;
             var transforms = root.GetComponentsInChildren<Transform>(true);
-            foreach (var t in transforms)
+            for (int i = 0; i < transforms.Length; i++)
             {
+                var t = transforms[i];
                 if (!t.gameObject.activeSelf) continue;
-                string name = t.gameObject.name;
+                string name = t.name;
                 if (name == "CharacterSelection" || name == "characterSelection" ||
                     name == "SelectCharacter" || name == "selectCharacter" ||
                     name == "CharacterSelect" || name == "characterSelect" ||
                     name.ToLowerInvariant().Contains("characterselect") ||
                     name.ToLowerInvariant().Contains("selectcharacter"))
                 {
-                    var rt = t.GetComponent<RectTransform>();
-                    if (rt != null)
-                    {
-                        // Anchor to bottom-center of the container and offset up slightly
-                        rt.anchorMin = new Vector2(0f, 0f);
-                        rt.anchorMax = new Vector2(1f, 0.85f);
-                        rt.offsetMin = Vector2.zero;
-                        rt.offsetMax = Vector2.zero;
-                        Debug.Log($"[Splitscreen][CharSelect] Repositioned '{name}' to lower area");
-                    }
+                    PositionContentLower(t);
                     break;
                 }
             }
@@ -740,12 +858,88 @@ namespace ValheimSplitscreen.UI
         }
 
         /// <summary>
+        /// Create a P2-specific world camera that renders the character select 3D scene
+        /// (campfire + character model) in P2's viewport. This avoids overriding Main Camera,
+        /// so P1 keeps the normal menu background while P2 sees the character select scene.
+        /// </summary>
+        private void StartCharacterPreviewWithP2Camera()
+        {
+            var fejd = FejdStartup.instance;
+            if (fejd == null)
+            {
+                Debug.LogWarning("[Splitscreen][CharSelect] StartCharacterPreviewWithP2Camera: FejdStartup null, skipping");
+                return;
+            }
+
+            var mainCamObj = _fejdMainCamera?.GetValue(fejd) as GameObject;
+            var mainCam = mainCamObj?.GetComponent<UnityEngine.Camera>();
+            var marker = _fejdCameraMarkerChar?.GetValue(fejd) as Transform;
+
+            if (mainCam == null || marker == null)
+            {
+                Debug.LogWarning($"[Splitscreen][CharSelect] P2 world camera: mainCam={(mainCam != null ? "OK" : "NULL")}, marker={(marker != null ? "OK" : "NULL")}");
+                // Fall back to camera override approach
+                StartCharacterPreview();
+                return;
+            }
+
+            // Create P2's world camera — DON'T use CopyFrom because it copies
+            // depthTextureMode and rendering settings that corrupt Valheim's shared
+            // depth buffers. Only set the essentials manually.
+            _p2WorldCamObj = new GameObject("P2_WorldCamera");
+            DontDestroyOnLoad(_p2WorldCamObj);
+            _p2WorldCam = _p2WorldCamObj.AddComponent<UnityEngine.Camera>();
+
+            _p2WorldCam.fieldOfView = mainCam.fieldOfView;
+            _p2WorldCam.nearClipPlane = mainCam.nearClipPlane;
+            _p2WorldCam.farClipPlane = mainCam.farClipPlane;
+            _p2WorldCam.cullingMask = mainCam.cullingMask;
+            _p2WorldCam.clearFlags = CameraClearFlags.Skybox;
+            _p2WorldCam.backgroundColor = Color.black;
+            _p2WorldCam.depthTextureMode = DepthTextureMode.None;
+            _p2WorldCam.allowHDR = false; // avoid shared HDR buffer conflicts
+            _p2WorldCam.allowMSAA = false;
+
+            // Viewport = P2's half, depth between Main Camera (0) and P1 UI camera (50)
+            bool horizontal = MenuSplitController.Instance?.IsHorizontal ?? true;
+            _p2WorldCam.rect = horizontal
+                ? new Rect(0, 0.5f, 1, 0.5f)  // top half
+                : new Rect(0.5f, 0, 0.5f, 1);  // right half
+            _p2WorldCam.depth = 1; // above Main Camera (0), below UI cameras (50+)
+
+            // Position at character select marker
+            _p2WorldCamObj.transform.position = marker.position;
+            _p2WorldCamObj.transform.rotation = marker.rotation;
+
+            Debug.Log($"[Splitscreen][CharSelect] Created P2_WorldCamera: viewport={_p2WorldCam.rect}, " +
+                $"pos={marker.position}, rot={marker.rotation.eulerAngles}, depth={_p2WorldCam.depth}");
+
+            // Spawn the character model (this uses FejdStartup's internal system)
+            if (_profiles != null && _profiles.Count > 0 && _selectedIndex >= 0 && _selectedIndex < _profiles.Count)
+            {
+                InvokeSetupPreview(_profiles[_selectedIndex]);
+            }
+
+            // Don't override Main Camera — P1 keeps their normal menu view
+            _overridingCamera = false;
+        }
+
+        /// <summary>
         /// Stop overriding the camera and clear the character preview.
         /// </summary>
         private void StopCharacterPreview()
         {
             Debug.Log("[Splitscreen][CharSelect] Stopping character preview, disabling camera override");
             _overridingCamera = false;
+
+            // Destroy P2 world camera if we created one
+            if (_p2WorldCamObj != null)
+            {
+                Destroy(_p2WorldCamObj);
+                _p2WorldCamObj = null;
+                _p2WorldCam = null;
+                Debug.Log("[Splitscreen][CharSelect] Destroyed P2_WorldCamera");
+            }
 
             var fejd = FejdStartup.instance;
             if (fejd == null) return;
@@ -847,7 +1041,7 @@ namespace ValheimSplitscreen.UI
                 _sourceInfoText.text = $"Character {_selectedIndex + 1} of {_profiles.Count}";
 
             // Update the 3D character model to match the selected profile
-            if (_overridingCamera)
+            if (_overridingCamera || _p2WorldCam != null)
                 InvokeSetupPreview(profile);
         }
 
@@ -858,8 +1052,32 @@ namespace ValheimSplitscreen.UI
             _onSelected?.Invoke(profile);
         }
 
+        private IEnumerator LogCloneStateNextFrames(Transform activePanel)
+        {
+            yield return null;
+            LogCloneTreeStats("clone_frame1");
+            LogCanvasDetails(_canvas, "clone_canvas_frame1");
+            LogCameraDetails(_p2UICam, "p2_ui_cam_frame1");
+            LogPanelVisibility(activePanel, "panel_frame1");
+            LogP2ScalingDiagnostics("clone_frame1");
+
+            yield return null;
+            LogCloneTreeStats("clone_frame2");
+            LogCanvasDetails(_canvas, "clone_canvas_frame2");
+            LogCameraDetails(_p2UICam, "p2_ui_cam_frame2");
+            LogPanelVisibility(activePanel, "panel_frame2");
+            LogP2ScalingDiagnostics("clone_frame2");
+        }
+
         // ===== UTILITY =====
 
+        /// <summary>
+        /// Strip all non-essential scripts from the clone.
+        /// Uses DestroyImmediate because the clone is inactive at this point —
+        /// deferred Destroy would leave components alive when we SetActive(true),
+        /// causing their Awake/OnEnable to fire (e.g. FejdStartup.Awake clobbers
+        /// the singleton, ObjectDB.Awake triggers other mods' Harmony patches).
+        /// </summary>
         private void StripScripts(GameObject root)
         {
             int stripped = 0;
@@ -874,6 +1092,7 @@ namespace ValheimSplitscreen.UI
                 if (comp is GraphicRaycaster) continue;
                 if (comp is Button) continue;
                 if (comp is Image) continue;
+                if (comp is RawImage) continue;
                 if (comp is Text) continue;
                 if (comp is LayoutGroup) continue;
                 if (comp is LayoutElement) continue;
@@ -891,12 +1110,12 @@ namespace ValheimSplitscreen.UI
 
                 if (comp is MonoBehaviour mb)
                 {
-                    Destroy(mb);
+                    DestroyImmediate(mb);
                     stripped++;
                 }
                 else if (comp is Animator anim)
                 {
-                    Destroy(anim);
+                    DestroyImmediate(anim);
                     stripped++;
                 }
             }
@@ -921,6 +1140,191 @@ namespace ValheimSplitscreen.UI
             }
             if (disabled > 0)
                 Debug.Log($"[Splitscreen][CharSelect] Disabled {disabled} button tip elements");
+
+            // Also clear any TMP_Text that shows "MISSING BUTTON DEF" placeholders
+            int cleared = 0;
+            var texts = root.GetComponentsInChildren<TMP_Text>(true);
+            foreach (var txt in texts)
+            {
+                if (txt.text != null && txt.text.Contains("MISSING BUTTON DEF"))
+                {
+                    txt.text = "";
+                    cleared++;
+                }
+            }
+            if (cleared > 0)
+                Debug.Log($"[Splitscreen][CharSelect] Cleared {cleared} 'MISSING BUTTON DEF' text elements");
+        }
+
+        private static void HideChangelogInClone(GameObject root)
+        {
+            int hidden = 0;
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            foreach (var t in transforms)
+            {
+                string name = t.gameObject.name;
+                if (name == "Canvas Changelog" || name == "Changelog" ||
+                    name.ToLowerInvariant().Contains("changelog"))
+                {
+                    t.gameObject.SetActive(false);
+                    hidden++;
+                    Debug.Log($"[Splitscreen][CharSelect] Hidden changelog element: '{name}'");
+                }
+            }
+            if (hidden == 0)
+                Debug.Log("[Splitscreen][CharSelect] No changelog elements found to hide");
+        }
+
+        /// <summary>
+        /// Fix CanvasGroup components so P2's clone buttons receive raycasts and interaction.
+        /// Valheim uses CanvasGroups to control panel visibility — hidden panels have
+        /// interactable=false and blocksRaycasts=false. The clone inherits these disabled
+        /// states since the character select panel was inactive in the source canvas.
+        /// </summary>
+        private void FixCanvasGroupsForInteraction(GameObject charSelectPanel)
+        {
+            int fixedCount = 0;
+
+            // Fix all CanvasGroups on the panel and its children
+            var panelGroups = charSelectPanel.GetComponentsInChildren<CanvasGroup>(true);
+            foreach (var cg in panelGroups)
+            {
+                bool needsFix = !cg.interactable || !cg.blocksRaycasts || cg.alpha < 0.01f;
+                if (needsFix)
+                {
+                    Debug.Log($"[Splitscreen][CharSelect] Fixing CanvasGroup on '{cg.gameObject.name}': " +
+                        $"interactable={cg.interactable}->true, blocksRaycasts={cg.blocksRaycasts}->true, alpha={cg.alpha:F2}->{(cg.alpha < 0.01f ? "1" : "kept")}");
+                    cg.interactable = true;
+                    cg.blocksRaycasts = true;
+                    if (cg.alpha < 0.01f) cg.alpha = 1f;
+                    fixedCount++;
+                }
+            }
+
+            // Fix CanvasGroups on ancestors between panel and canvas root
+            var walk = charSelectPanel.transform.parent;
+            while (walk != null && _canvasRoot != null && walk != _canvasRoot.transform)
+            {
+                var cg = walk.GetComponent<CanvasGroup>();
+                if (cg != null && (!cg.interactable || !cg.blocksRaycasts))
+                {
+                    Debug.Log($"[Splitscreen][CharSelect] Fixing ancestor CanvasGroup on '{cg.gameObject.name}': " +
+                        $"interactable={cg.interactable}->true, blocksRaycasts={cg.blocksRaycasts}->true");
+                    cg.interactable = true;
+                    cg.blocksRaycasts = true;
+                    fixedCount++;
+                }
+                walk = walk.parent;
+            }
+
+            // Fix on canvas root itself
+            if (_canvasRoot != null)
+            {
+                var rootCG = _canvasRoot.GetComponent<CanvasGroup>();
+                if (rootCG != null && (!rootCG.interactable || !rootCG.blocksRaycasts))
+                {
+                    Debug.Log($"[Splitscreen][CharSelect] Fixing root CanvasGroup: " +
+                        $"interactable={rootCG.interactable}->true, blocksRaycasts={rootCG.blocksRaycasts}->true");
+                    rootCG.interactable = true;
+                    rootCG.blocksRaycasts = true;
+                    fixedCount++;
+                }
+            }
+
+            // Log all CanvasGroups in the entire clone for diagnostics
+            if (_canvasRoot != null)
+            {
+                var allGroups = _canvasRoot.GetComponentsInChildren<CanvasGroup>(true);
+                Debug.Log($"[Splitscreen][CharSelect] CanvasGroup summary: {allGroups.Length} total, {fixedCount} fixed");
+                foreach (var cg in allGroups)
+                {
+                    Debug.Log($"[Splitscreen][CharSelect]   CG '{cg.gameObject.name}': interactable={cg.interactable}, " +
+                        $"blocksRaycasts={cg.blocksRaycasts}, alpha={cg.alpha:F2}, activeInHierarchy={cg.gameObject.activeInHierarchy}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Ensure the clone canvas has an active GraphicRaycaster so pointer events work.
+        /// </summary>
+        private void EnsureGraphicRaycaster()
+        {
+            if (_canvasRoot == null) return;
+
+            var raycaster = _canvasRoot.GetComponent<GraphicRaycaster>();
+            if (raycaster == null)
+            {
+                raycaster = _canvasRoot.AddComponent<GraphicRaycaster>();
+                Debug.Log("[Splitscreen][CharSelect] Added missing GraphicRaycaster to clone canvas");
+            }
+            else if (!raycaster.enabled)
+            {
+                raycaster.enabled = true;
+                Debug.Log("[Splitscreen][CharSelect] Re-enabled GraphicRaycaster on clone canvas");
+            }
+            else
+            {
+                Debug.Log($"[Splitscreen][CharSelect] GraphicRaycaster OK: enabled={raycaster.enabled}");
+            }
+
+            // Log EventSystem state
+            var es = EventSystem.current;
+            if (es != null)
+            {
+                var module = es.currentInputModule;
+                Debug.Log($"[Splitscreen][CharSelect] EventSystem: '{es.name}', enabled={es.enabled}, " +
+                    $"module={(module != null ? module.GetType().Name + " enabled=" + module.enabled : "null")}");
+            }
+            else
+            {
+                Debug.LogWarning("[Splitscreen][CharSelect] No EventSystem.current found!");
+            }
+        }
+
+        /// <summary>
+        /// Ensure all buttons in the character select panel are interactable and
+        /// their target graphics have raycastTarget enabled.
+        /// </summary>
+        private static void EnsureButtonInteractability(GameObject charSelectPanel)
+        {
+            var buttons = charSelectPanel.GetComponentsInChildren<Button>(true);
+            int fixedInteractable = 0;
+            int fixedRaycast = 0;
+
+            foreach (var btn in buttons)
+            {
+                if (!btn.interactable)
+                {
+                    btn.interactable = true;
+                    fixedInteractable++;
+                    Debug.Log($"[Splitscreen][CharSelect] Fixed non-interactable button: '{btn.gameObject.name}'");
+                }
+
+                // Ensure the button's target graphic accepts raycasts
+                var graphic = btn.targetGraphic;
+                if (graphic != null && !graphic.raycastTarget)
+                {
+                    graphic.raycastTarget = true;
+                    fixedRaycast++;
+                    Debug.Log($"[Splitscreen][CharSelect] Fixed raycastTarget on '{btn.gameObject.name}' graphic");
+                }
+
+                // Also check the button's own Image if targetGraphic is null
+                if (graphic == null)
+                {
+                    var img = btn.GetComponent<Image>();
+                    if (img != null)
+                    {
+                        img.raycastTarget = true;
+                        btn.targetGraphic = img;
+                        fixedRaycast++;
+                        Debug.Log($"[Splitscreen][CharSelect] Assigned Image as targetGraphic on '{btn.gameObject.name}'");
+                    }
+                }
+            }
+
+            Debug.Log($"[Splitscreen][CharSelect] Button interactability check: {buttons.Length} buttons, " +
+                $"{fixedInteractable} made interactable, {fixedRaycast} raycast targets fixed");
         }
 
         private static void SetButtonText(Button btn, string text)
@@ -1048,12 +1452,149 @@ namespace ValheimSplitscreen.UI
             }
         }
 
+        private static void LogCanvasDetails(Canvas canvas, string tag)
+        {
+            if (canvas == null)
+            {
+                Debug.Log($"[Splitscreen][CharSelect][Diag] Canvas '{tag}' is null");
+                return;
+            }
+
+            var rt = canvas.GetComponent<RectTransform>();
+            string anchors = rt != null
+                ? $"anchors=({rt.anchorMin.x:F2},{rt.anchorMin.y:F2})-({rt.anchorMax.x:F2},{rt.anchorMax.y:F2}), size=({rt.rect.width:F1}x{rt.rect.height:F1})"
+                : "anchors=n/a";
+
+            int childCanvasCount = canvas.GetComponentsInChildren<Canvas>(true).Length;
+            int graphicsCount = canvas.GetComponentsInChildren<Graphic>(true).Length;
+
+            Debug.Log($"[Splitscreen][CharSelect][Diag] Canvas '{tag}': name='{canvas.name}', active={canvas.gameObject.activeInHierarchy}, enabled={canvas.enabled}, " +
+                $"renderMode={canvas.renderMode}, worldCamera={(canvas.worldCamera != null ? canvas.worldCamera.name : "null")}, planeDistance={canvas.planeDistance}, " +
+                $"sortOrder={canvas.sortingOrder}, {anchors}, childCanvases={childCanvasCount}, graphics={graphicsCount}");
+        }
+
+        private static void LogCameraDetails(UnityEngine.Camera camera, string tag)
+        {
+            if (camera == null)
+            {
+                Debug.Log($"[Splitscreen][CharSelect][Diag] Camera '{tag}' is null");
+                return;
+            }
+
+            Debug.Log($"[Splitscreen][CharSelect][Diag] Camera '{tag}': name='{camera.name}', active={camera.gameObject.activeInHierarchy}, enabled={camera.enabled}, " +
+                $"clear={camera.clearFlags}, rect={camera.rect}, depth={camera.depth}, near={camera.nearClipPlane}, far={camera.farClipPlane}, " +
+                $"cull={camera.cullingMask}, target={(camera.targetTexture != null ? camera.targetTexture.name : "SCREEN")}");
+        }
+
+        private void LogCloneTreeStats(string tag)
+        {
+            if (_canvasRoot == null)
+            {
+                Debug.Log($"[Splitscreen][CharSelect][Diag] Clone stats '{tag}': canvasRoot is null");
+                return;
+            }
+
+            var transforms = _canvasRoot.GetComponentsInChildren<Transform>(true);
+            var graphics = _canvasRoot.GetComponentsInChildren<Graphic>(true);
+            var canvases = _canvasRoot.GetComponentsInChildren<Canvas>(true);
+
+            int activeObjects = 0;
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                if (transforms[i] != null && transforms[i].gameObject.activeInHierarchy)
+                {
+                    activeObjects++;
+                }
+            }
+
+            int activeGraphics = 0;
+            for (int i = 0; i < graphics.Length; i++)
+            {
+                if (graphics[i] != null && graphics[i].gameObject.activeInHierarchy)
+                {
+                    activeGraphics++;
+                }
+            }
+
+            Debug.Log($"[Splitscreen][CharSelect][Diag] Clone stats '{tag}': name='{_canvasRoot.name}', active={_canvasRoot.activeInHierarchy}, " +
+                $"objects={transforms.Length}, activeObjects={activeObjects}, canvases={canvases.Length}, graphics={graphics.Length}, activeGraphics={activeGraphics}");
+        }
+
+        private static void LogPanelVisibility(Transform panel, string tag)
+        {
+            if (panel == null)
+            {
+                Debug.Log($"[Splitscreen][CharSelect][Diag] Panel visibility '{tag}': panel is null");
+                return;
+            }
+
+            int childActive = 0;
+            for (int i = 0; i < panel.childCount; i++)
+            {
+                if (panel.GetChild(i).gameObject.activeSelf) childActive++;
+            }
+
+            Debug.Log($"[Splitscreen][CharSelect][Diag] Panel visibility '{tag}': panel='{panel.name}', activeSelf={panel.gameObject.activeSelf}, " +
+                $"activeInHierarchy={panel.gameObject.activeInHierarchy}, children={panel.childCount}, activeChildren={childActive}");
+        }
+
+        /// <summary>
+        /// Log comprehensive P2 scaling diagnostics: camera pixel rect, canvas rect
+        /// transform size, local scale (the effective scale factor from CanvasScaler),
+        /// and the CanvasScaler configuration.
+        /// </summary>
+        private void LogP2ScalingDiagnostics(string tag)
+        {
+            Debug.Log($"[Splitscreen][Scale][P2] === P2 scaling diagnostics ({tag}) ===");
+            Debug.Log($"[Splitscreen][Scale][P2] Screen: {Screen.width}x{Screen.height}");
+
+            if (_p2UICam != null)
+            {
+                Debug.Log($"[Splitscreen][Scale][P2] P2_UICamera: pixelRect={_p2UICam.pixelRect}, " +
+                    $"pixelW={_p2UICam.pixelWidth}, pixelH={_p2UICam.pixelHeight}, " +
+                    $"viewport={_p2UICam.rect}, enabled={_p2UICam.enabled}");
+            }
+            else
+            {
+                Debug.Log("[Splitscreen][Scale][P2] P2_UICamera: NULL");
+            }
+
+            if (_canvas != null)
+            {
+                var rt = _canvas.GetComponent<RectTransform>();
+                Debug.Log($"[Splitscreen][Scale][P2] P2 Canvas '{_canvas.name}': " +
+                    $"renderMode={_canvas.renderMode}, " +
+                    $"rtSize={rt?.rect.width:F1}x{rt?.rect.height:F1}, " +
+                    $"localScale=({rt?.localScale.x:F4},{rt?.localScale.y:F4}), " +
+                    $"scaleFactor={_canvas.scaleFactor:F4}, " +
+                    $"worldCam={(_canvas.worldCamera != null ? _canvas.worldCamera.name : "null")}");
+
+                var scaler = _canvas.GetComponent<CanvasScaler>();
+                if (scaler != null)
+                {
+                    Debug.Log($"[Splitscreen][Scale][P2] P2 CanvasScaler: mode={scaler.uiScaleMode}, " +
+                        $"scaleFactor={scaler.scaleFactor:F4}, " +
+                        $"ref={scaler.referenceResolution.x:F0}x{scaler.referenceResolution.y:F0}, " +
+                        $"matchMode={scaler.screenMatchMode}, match={scaler.matchWidthOrHeight:F2}");
+                }
+            }
+            else
+            {
+                Debug.Log("[Splitscreen][Scale][P2] P2 Canvas: NULL");
+            }
+
+            Debug.Log($"[Splitscreen][Scale][P2] === End P2 scaling diagnostics ({tag}) ===");
+        }
+
         private void OnDestroy()
         {
             RestoreEventSystemInput();
             _overridingCamera = false;
             if (_canvasRoot != null) Destroy(_canvasRoot);
+            if (_p2UICamObj != null) Destroy(_p2UICamObj);
+            if (_p2WorldCamObj != null) Destroy(_p2WorldCamObj);
             Instance = null;
         }
     }
 }
+

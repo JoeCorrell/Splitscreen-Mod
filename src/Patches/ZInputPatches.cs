@@ -27,8 +27,6 @@ namespace ValheimSplitscreen.Patches
         private static float _lastModeLogTime;
         private static int _blockedButtonCount;
         private static string _lastBlockedButton;
-        private static float _lastUnmappedLogTime;
-        private static string _lastUnmappedButton;
 
         /// <summary>
         /// Get the player index currently executing input code.
@@ -146,7 +144,7 @@ namespace ValheimSplitscreen.Patches
             }
 
             int context = GetContextPlayerIndex();
-            bool shouldRoute = IsJoyButton(name) || (context == 1 && IsContextRoutedAction(name));
+            bool shouldRoute = IsJoyButton(name) || context == 1;
             if (shouldRoute)
             {
                 var state = GetContextInputState();
@@ -154,11 +152,6 @@ namespace ValheimSplitscreen.Patches
                 {
                     __result = state.GetButton(name);
                 }
-            }
-            else if (context == 1 && !IsJoyButton(name) && __result)
-            {
-                // P2 context but non-routed keyboard action returned true — block P1 keyboard leak
-                __result = false;
             }
         }
 
@@ -178,7 +171,7 @@ namespace ValheimSplitscreen.Patches
             }
 
             int context = GetContextPlayerIndex();
-            bool shouldRoute = IsJoyButton(name) || (context == 1 && IsContextRoutedAction(name));
+            bool shouldRoute = IsJoyButton(name) || context == 1;
             if (shouldRoute)
             {
                 var state = GetContextInputState();
@@ -186,17 +179,6 @@ namespace ValheimSplitscreen.Patches
                 {
                     __result = state.GetButtonDown(name);
                 }
-            }
-            else if (context == 1 && !IsJoyButton(name) && __result)
-            {
-                // P2 context but non-routed keyboard action returned true — P1 keyboard leaking
-                if (Time.time - _lastUnmappedLogTime > 2f)
-                {
-                    _lastUnmappedLogTime = Time.time;
-                    _lastUnmappedButton = name;
-                    Debug.LogWarning($"[Splitscreen][ZInput] P2 context: non-routed button '{name}' returned true (P1 keyboard leak?) — blocking");
-                }
-                __result = false;
             }
         }
 
@@ -212,7 +194,7 @@ namespace ValheimSplitscreen.Patches
             }
 
             int context = GetContextPlayerIndex();
-            bool shouldRoute = IsJoyButton(name) || (context == 1 && IsContextRoutedAction(name));
+            bool shouldRoute = IsJoyButton(name) || context == 1;
             if (!shouldRoute) return;
 
             var state = GetContextInputState();
@@ -480,3 +462,4 @@ namespace ValheimSplitscreen.Patches
         }
     }
 }
+

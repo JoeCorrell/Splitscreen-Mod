@@ -336,8 +336,8 @@ namespace ValheimSplitscreen.Player
 
         private void FixedUpdate()
         {
-            if (SplitScreenManager.Instance == null || !SplitScreenManager.Instance.SplitscreenActive) return;
-            UpdatePlayer2Controls();
+            // P2 input now runs through vanilla PlayerController with context swaps.
+            // Keep this manager focused on P2 lifecycle (spawn/despawn/profile).
         }
 
         private void OnDestroy()

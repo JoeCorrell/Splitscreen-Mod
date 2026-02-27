@@ -309,16 +309,56 @@ namespace ValheimSplitscreen.Input
                     return MoveAxis.x < -0.3f;
                 case "Right":
                     return MoveAxis.x > 0.3f;
+                case "JoyLStickLeft":
+                    return MoveAxis.x < -0.3f;
+                case "JoyLStickRight":
+                    return MoveAxis.x > 0.3f;
+                case "JoyLStickUp":
+                    return MoveAxis.y > 0.3f;
+                case "JoyLStickDown":
+                    return MoveAxis.y < -0.3f;
+                case "JoyRStickLeft":
+                    return LookAxis.x < -0.3f;
+                case "JoyRStickRight":
+                    return LookAxis.x > 0.3f;
+                case "JoyRStickUp":
+                    return LookAxis.y > 0.3f;
+                case "JoyRStickDown":
+                    return LookAxis.y < -0.3f;
+                case "JoyDPadLeft":
+                    return DpadLeft;
+                case "JoyDPadRight":
+                    return DpadRight;
+                case "JoyDPadUp":
+                    return DpadUp;
+                case "JoyDPadDown":
+                    return DpadDown;
                 case "JoyAltKeys":
                     return GetAltKeysHold();
                 case "JoyCamZoomIn":
+                case "CamZoomIn":
                     return DpadUp;
                 case "JoyCamZoomOut":
+                case "CamZoomOut":
                     return DpadDown;
+                case "MapZoomIn":
+                    return DpadRight;
+                case "MapZoomOut":
+                    return DpadLeft;
                 case "JoyTabLeft":
+                case "TabLeft":
                     return LeftShoulder;
                 case "JoyTabRight":
+                case "TabRight":
                     return RightShoulder;
+                case "JoyLBumper":
+                    return LeftShoulder;
+                case "JoyRBumper":
+                    return RightShoulder;
+                case "JoyLTrigger":
+                    return LeftTrigger > 0.4f;
+                case "JoyRTrigger":
+                    return RightTrigger > 0.4f;
                 case "JoyButtonY":
                     return ButtonNorth;
                 case "JoyButtonX":
@@ -338,13 +378,15 @@ namespace ValheimSplitscreen.Input
                 case "JoyPlace":
                     return GetAttackHold();
                 case "JoyRemove":
+                case "Remove":
                     return GetSecondaryAttackHold();
                 case "JoyBuildMenu":
+                case "BuildMenu":
                     return GetBuildMenuHold();
                 case "AutoRun":
                     return false;
                 case "Inventory":
-                    return SelectButton;
+                    return SelectButton || ButtonNorth;
                 case "JoyInventory":
                     return ButtonNorth;
                 case "JoyMenu":
@@ -354,6 +396,7 @@ namespace ValheimSplitscreen.Input
                 case "JoyBack":
                 case "JoyMap":
                 case "JoyChat":
+                case "Map":
                     return SelectButton;
                 case "JoyUse":
                 case "Use":
@@ -364,6 +407,8 @@ namespace ValheimSplitscreen.Input
                     return GetSitHold();
                 case "JoyGPower":
                 case "JoyGP":
+                case "GP":
+                case "GPower":
                     return DpadDown;
                 case "JoyHotbarLeft":
                     return DpadLeft;
@@ -403,16 +448,53 @@ namespace ValheimSplitscreen.Input
                     return GetRunDown();
                 case "JoyDodge":
                     return ButtonEastDown && GetAltKeysHold();
+                case "Forward":
+                case "Backward":
+                case "Left":
+                case "Right":
+                case "JoyLStickLeft":
+                case "JoyLStickRight":
+                case "JoyLStickUp":
+                case "JoyLStickDown":
+                case "JoyRStickLeft":
+                case "JoyRStickRight":
+                case "JoyRStickUp":
+                case "JoyRStickDown":
+                    return false;
+                case "JoyDPadLeft":
+                    return DpadLeftDown;
+                case "JoyDPadRight":
+                    return DpadRightDown;
+                case "JoyDPadUp":
+                    return DpadUpDown;
+                case "JoyDPadDown":
+                    return DpadDownDown;
                 case "JoyAltKeys":
                     return IsAlt1Layout ? LeftShoulderDown : LeftTriggerDown;
                 case "JoyCamZoomIn":
+                case "CamZoomIn":
                     return DpadUpDown;
                 case "JoyCamZoomOut":
+                case "CamZoomOut":
                     return DpadDownDown;
+                case "MapZoomIn":
+                    return DpadRightDown;
+                case "MapZoomOut":
+                    return DpadLeftDown;
                 case "JoyTabLeft":
+                case "TabLeft":
                     return LeftShoulderDown;
                 case "JoyTabRight":
+                case "TabRight":
                     return RightShoulderDown;
+                case "JoyLBumper":
+                    return LeftShoulderDown;
+                case "JoyRBumper":
+                    return RightShoulderDown;
+                case "JoyLTrigger":
+                    return LeftTriggerDown;
+                case "JoyRTrigger":
+                    return RightTriggerDown;
                 case "JoyButtonY":
                     return ButtonNorthDown;
                 case "JoyButtonX":
@@ -426,7 +508,7 @@ namespace ValheimSplitscreen.Input
                 case "JoyRStick":
                     return RightStickPressDown;
                 case "Inventory":
-                    return SelectButtonDown;
+                    return SelectButtonDown || ButtonNorthDown;
                 case "JoyInventory":
                     return ButtonNorthDown;
                 case "JoyMenu":
@@ -436,22 +518,32 @@ namespace ValheimSplitscreen.Input
                 case "JoyBack":
                 case "JoyMap":
                 case "JoyChat":
+                case "Map":
                     return SelectButtonDown;
                 case "JoyUse":
                 case "Use":
                     return GetUseDown();
                 case "JoyBuildMenu":
+                case "BuildMenu":
                     return GetBuildMenuDown();
                 case "JoyHide":
                     return GetHideDown();
                 case "JoySit":
                     return GetSitDown();
+                case "JoyRemove":
+                case "Remove":
+                    return GetSecondaryAttackDown();
                 case "JoyHotbarLeft":
                     return DpadLeftDown;
                 case "JoyHotbarRight":
                     return DpadRightDown;
                 case "JoyHotbarUse":
                     return DpadUpDown;
+                case "JoyGPower":
+                case "JoyGP":
+                case "GP":
+                case "GPower":
+                    return DpadDownDown;
                 default:
                     return false;
             }

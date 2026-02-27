@@ -42,6 +42,7 @@ namespace ValheimSplitscreen.Patches
                 return;
             }
             Debug.Log("[Splitscreen][Menu] FejdStartup.Awake postfix — will create button after UI initializes");
+            SplitScreenManager.Instance?.RefreshMainMenuSplit();
             __instance.StartCoroutine(DelayedCreateButton(__instance));
         }
 
@@ -52,6 +53,7 @@ namespace ValheimSplitscreen.Patches
             yield return null;
             Debug.Log("[Splitscreen][Menu] Delayed button creation running");
             CreateSplitscreenButton(fejd);
+            SplitScreenManager.Instance?.RefreshMainMenuSplit();
         }
 
         /// <summary>
@@ -62,6 +64,7 @@ namespace ValheimSplitscreen.Patches
         [HarmonyPostfix]
         public static void ShowStartGame_Postfix()
         {
+            SplitScreenManager.Instance?.RefreshMainMenuSplit();
             UpdateButtonLabel();
         }
 
@@ -241,59 +244,12 @@ namespace ValheimSplitscreen.Patches
                 return;
             }
 
-            // Toggle through states
-            switch (mgr.State)
-            {
-                case SplitscreenState.Disabled:
-                    // Enter menu split mode
-                    Debug.Log("[Splitscreen][Menu] Entering MenuSplit from button");
-                    mgr.State = SplitscreenState.MenuSplit;
-                    var config = SplitscreenPlugin.Instance?.SplitConfig;
-                    bool horizontal = config?.Orientation?.Value == ValheimSplitscreen.Config.SplitOrientation.Horizontal;
-                    mgr.MenuSplit.Activate(horizontal);
-                    mgr.CharacterSelect.IsMenuSplitMode = true;
-                    mgr.CharacterSelect.IsMainMenuMode = false;
-                    mgr.CharacterSelect.Show(
-                        onSelected: (profile) =>
-                        {
-                            mgr.OnP2CharacterSelected(profile);
-                            mgr.MenuSplit.SetP2Ready(profile?.GetName() ?? "New Character");
-                            UpdateButtonLabel();
-                        },
-                        onCancelled: () =>
-                        {
-                            mgr.MenuSplit.Deactivate();
-                            mgr.State = SplitscreenState.Disabled;
-                            UpdateButtonLabel();
-                        }
-                    );
-                    UpdateButtonLabel();
-                    break;
+            if (mgr.SplitEnabled)
+                mgr.DisableSplitMode();
+            else
+                mgr.EnableMenuSplit();
 
-                case SplitscreenState.MenuSplit:
-                    // Cancel menu split
-                    mgr.CharacterSelect.Hide();
-                    mgr.MenuSplit.Deactivate();
-                    mgr.State = SplitscreenState.Disabled;
-                    mgr.PendingP2Profile = null;
-                    UpdateButtonLabel();
-                    break;
-
-                case SplitscreenState.PendingCharSelect:
-                    // Legacy cancel
-                    mgr.CharacterSelect.Hide();
-                    mgr.State = SplitscreenState.Disabled;
-                    UpdateButtonLabel();
-                    break;
-
-                case SplitscreenState.Armed:
-                    // Disarm and restore full screen
-                    mgr.MenuSplit.Deactivate();
-                    mgr.State = SplitscreenState.Disabled;
-                    mgr.PendingP2Profile = null;
-                    UpdateButtonLabel();
-                    break;
-            }
+            UpdateButtonLabel();
         }
 
         private static void UpdateButtonLabel()
@@ -303,24 +259,35 @@ namespace ValheimSplitscreen.Patches
             if (mgr == null) return;
 
             string label;
-            switch (mgr.State)
+            if (!mgr.SplitEnabled)
             {
-                case SplitscreenState.Armed:
-                    string name = mgr.PendingP2Profile?.GetName() ?? "New Character";
-                    label = $"Splitscreen: {name}";
-                    break;
-                case SplitscreenState.MenuSplit:
-                    label = "Splitscreen: Selecting...";
-                    break;
-                case SplitscreenState.PendingCharSelect:
-                    label = "Splitscreen: Selecting...";
-                    break;
-                default:
-                    label = "Splitscreen";
-                    break;
+                label = "Splitscreen";
+            }
+            else
+            {
+                switch (mgr.State)
+                {
+                    case SplitscreenState.AwaitingP2Character:
+                        label = "Splitscreen: P2 Select";
+                        break;
+                    case SplitscreenState.Armed:
+                        label = "Splitscreen: Loading";
+                        break;
+                    case SplitscreenState.Active:
+                        label = "Splitscreen: Active";
+                        break;
+                    default:
+                        label = "Splitscreen: ON";
+                        break;
+                }
             }
 
             SetButtonLabel(_splitscreenButton, label);
+        }
+
+        public static void RefreshButtonState()
+        {
+            UpdateButtonLabel();
         }
 
         /// <summary>Get the text label from a button (supports both legacy Text and TextMeshPro).</summary>
@@ -426,3 +393,4 @@ namespace ValheimSplitscreen.Patches
         }
     }
 }
+
