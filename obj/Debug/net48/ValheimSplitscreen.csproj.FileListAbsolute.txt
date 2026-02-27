@@ -7,3 +7,4 @@ C:\Projects\Splitscreen Mod\bin\Debug\net48\ValheimSplitscreen.dll
 C:\Projects\Splitscreen Mod\bin\Debug\net48\ValheimSplitscreen.pdb
 C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.dll
 C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.pdb
+C:\Projects\Splitscreen Mod\obj\Debug\net48\ValheimSplitscreen.sourcelink.json

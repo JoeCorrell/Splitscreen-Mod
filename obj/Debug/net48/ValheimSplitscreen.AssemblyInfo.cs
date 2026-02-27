@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ValheimSplitscreen")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+73fe1c34dbc6d8c25c7af7e708fa5cf3710c3a40")]
 [assembly: System.Reflection.AssemblyProductAttribute("ValheimSplitscreen")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ValheimSplitscreen")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
