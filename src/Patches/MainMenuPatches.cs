@@ -17,11 +17,31 @@ namespace ValheimSplitscreen.Patches
         private static GameObject _splitscreenButton;
 
         [HarmonyPatch(typeof(FejdStartup), "Awake")]
+        [HarmonyPrefix]
+        public static bool FejdStartup_Awake_Prefix(FejdStartup __instance)
+        {
+            // Skip Awake entirely for cloned instances to prevent clobbering the singleton.
+            // CharacterSelectUI sets IsCloning=true before Instantiate (name isn't set until after).
+            if (CharacterSelectUI.IsCloning)
+            {
+                Debug.Log("[Splitscreen][Menu] FejdStartup.Awake prefix — SKIPPING cloned instance");
+                return false; // skip original Awake
+            }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(FejdStartup), "Awake")]
         [HarmonyPostfix]
         public static void FejdStartup_Awake_Postfix(FejdStartup __instance)
         {
+            // Skip if this isn't the real singleton (clone's Awake was skipped by prefix,
+            // but postfix still runs — check instance identity)
+            if (__instance != FejdStartup.instance)
+            {
+                Debug.Log("[Splitscreen][Menu] FejdStartup.Awake postfix — skipping non-singleton instance");
+                return;
+            }
             Debug.Log("[Splitscreen][Menu] FejdStartup.Awake postfix — will create button after UI initializes");
-            // Delay button creation slightly to ensure UI is fully built
             __instance.StartCoroutine(DelayedCreateButton(__instance));
         }
 
@@ -127,11 +147,10 @@ namespace ValheimSplitscreen.Patches
         }
 
         /// <summary>
-        /// Remove all MonoBehaviour components from the cloned button that aren't
-        /// essential for rendering and interaction. Keeps: Button, Image, Text/TMP,
-        /// layout components, CanvasRenderer. Destroys everything else (ButtonSfx,
-        /// UITooltip, event triggers, animation scripts, etc.) so clicking the
-        /// cloned button doesn't also trigger the original Settings behavior.
+        /// Remove game-specific MonoBehaviour components from the cloned button that
+        /// would cause unintended behavior (opening Settings panel, playing wrong sounds).
+        /// Keeps: Button, Image, Text/TMP, layout components, CanvasRenderer, Animator
+        /// (for hover/selected visual transitions).
         /// </summary>
         private static void StripNonEssentialComponents(GameObject root)
         {
@@ -153,23 +172,22 @@ namespace ValheimSplitscreen.Patches
                 if (comp is Mask) continue;
                 if (comp is RectMask2D) continue;
 
+                // Keep Animator — drives hover/selected/pressed visual transitions
+                if (comp is Animator) continue;
+
                 // Keep TextMeshPro (check by type name since it's in a separate assembly)
                 string typeName = comp.GetType().Name;
                 if (typeName.Contains("TMP_") || typeName.Contains("TextMeshPro")) continue;
 
-                // Destroy everything else (ButtonSfx, UITooltip, EventTrigger, Animator, etc.)
+                // Destroy game-specific scripts (ButtonSfx, UITooltip, EventTrigger, etc.)
                 if (comp is MonoBehaviour mb)
                 {
+                    Debug.Log($"[Splitscreen][Menu] Stripping MonoBehaviour: {typeName} from '{comp.gameObject.name}'");
                     Object.Destroy(mb);
                     stripped++;
                 }
-                else if (comp is Animator anim)
-                {
-                    Object.Destroy(anim);
-                    stripped++;
-                }
             }
-            Debug.Log($"[Splitscreen][Menu] Stripped {stripped} non-essential components from cloned button");
+            Debug.Log($"[Splitscreen][Menu] Stripped {stripped} non-essential components from cloned button (kept Animator for hover effects)");
         }
 
         /// <summary>
@@ -366,14 +384,45 @@ namespace ValheimSplitscreen.Patches
             }
         }
 
-        /// <summary>Clean up when scene changes.</summary>
+        /// <summary>Clean up when scene changes — only for the real FejdStartup, not clones.</summary>
+        [HarmonyPatch(typeof(FejdStartup), "OnDestroy")]
+        [HarmonyPrefix]
+        public static bool FejdStartup_OnDestroy_Prefix(FejdStartup __instance)
+        {
+            // Skip OnDestroy entirely for cloned instances
+            if (__instance != FejdStartup.instance)
+            {
+                Debug.Log("[Splitscreen][Menu] FejdStartup.OnDestroy prefix — SKIPPING non-singleton instance");
+                return false;
+            }
+            return true;
+        }
+
         [HarmonyPatch(typeof(FejdStartup), "OnDestroy")]
         [HarmonyPostfix]
-        public static void FejdStartup_OnDestroy_Postfix()
+        public static void FejdStartup_OnDestroy_Postfix(FejdStartup __instance)
         {
+            // Only clean up if this is the real singleton instance
+            if (__instance != FejdStartup.instance) return;
+
             _splitscreenButton = null;
             // Clean up menu split if still active when leaving main menu
             SplitScreenManager.Instance?.MenuSplit?.Deactivate();
+        }
+
+        /// <summary>
+        /// Override the camera position after the game's UpdateCamera runs.
+        /// When P2's character select is open, force the camera to the campfire/character marker.
+        /// Camera.onPreRender doesn't work in Unity 6, so we patch the game's own camera method.
+        /// </summary>
+        [HarmonyPatch(typeof(FejdStartup), "UpdateCamera")]
+        [HarmonyPostfix]
+        public static void UpdateCamera_Postfix(FejdStartup __instance)
+        {
+            var charSelect = CharacterSelectUI.Instance;
+            if (charSelect == null || !charSelect.IsVisible || !charSelect.IsMenuSplitMode) return;
+
+            charSelect.OverrideCameraFromPatch(__instance);
         }
     }
 }

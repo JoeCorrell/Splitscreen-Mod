@@ -6,9 +6,9 @@ using UnityEngine.UI;
 namespace ValheimSplitscreen.UI
 {
     /// <summary>
-    /// Controls the visual menu split: covers P2's half with a dark overlay canvas
-    /// (ScreenSpaceOverlay with high sortingOrder) and blocks raycasts in P2's area.
-    /// Also confines the game's menu UI to P1's half using a RectMask2D container.
+    /// Controls the visual menu split: confines the game's menu UI to P1's half
+    /// using a RectMask2D container, letting the 3D background show through on P2's half.
+    /// An overlay canvas provides the divider line and ready status display.
     /// </summary>
     public class MenuSplitController : MonoBehaviour
     {
@@ -20,7 +20,7 @@ namespace ValheimSplitscreen.UI
         private bool _p2Ready;
         private string _p2CharacterName;
 
-        // Dark overlay canvas covers P2's half (blocks raycasts + visually covers game UI)
+        // Overlay canvas for divider line and ready status (no dark panel — 3D scene shows through)
         private GameObject _overlayRoot;
         private Canvas _overlayCanvas;
 
@@ -30,6 +30,7 @@ namespace ValheimSplitscreen.UI
 
         // Menu confinement: reparent game menu content into a clipped container
         private GameObject _menuClipContainer;
+        private GameObject _innerFullScreen; // full-screen child of clip so content isn't squished
         private Canvas _confinedCanvas;
         private List<Transform> _reparentedChildren;
         private Dictionary<Transform, int> _originalSiblingIndices;
@@ -148,7 +149,32 @@ namespace ValheimSplitscreen.UI
             // Ensure the clip container is at index 0 so it's behind everything
             _menuClipContainer.transform.SetAsFirstSibling();
 
-            // Collect existing children (skip our container)
+            // Create a full-screen inner container inside the clip.
+            // Without this, children anchored to (0,0)-(1,1) fill only the clip (half screen)
+            // and get squished. The inner container extends beyond the clip to full-screen size,
+            // and the RectMask2D clips the overflow.
+            _innerFullScreen = new GameObject("P1_InnerFull");
+            _innerFullScreen.transform.SetParent(_menuClipContainer.transform, false);
+            var innerRT = _innerFullScreen.AddComponent<RectTransform>();
+
+            if (_horizontal)
+            {
+                // Clip = top half, anchors (0, 0.5)-(1, 1) in canvas.
+                // In clip-local coords: full screen = (0, -1) to (1, 1)
+                innerRT.anchorMin = new Vector2(0, -1);
+                innerRT.anchorMax = new Vector2(1, 1);
+            }
+            else
+            {
+                // Clip = left half, anchors (0, 0)-(0.5, 1) in canvas.
+                // In clip-local coords: full screen = (0, 0) to (2, 1)
+                innerRT.anchorMin = new Vector2(0, 0);
+                innerRT.anchorMax = new Vector2(2, 1);
+            }
+            innerRT.offsetMin = Vector2.zero;
+            innerRT.offsetMax = Vector2.zero;
+
+            // Collect existing children (skip our containers)
             _reparentedChildren = new List<Transform>();
             _originalSiblingIndices = new Dictionary<Transform, int>();
             var childCount = _confinedCanvas.transform.childCount;
@@ -160,13 +186,13 @@ namespace ValheimSplitscreen.UI
                 _originalSiblingIndices[child] = i;
             }
 
-            // Reparent all children under the clip container
+            // Reparent all children under the inner full-screen container
             foreach (var child in _reparentedChildren)
             {
-                child.SetParent(_menuClipContainer.transform, false);
+                child.SetParent(_innerFullScreen.transform, false);
             }
 
-            Debug.Log($"[Splitscreen][MenuSplit] Reparented {_reparentedChildren.Count} children under clip container");
+            Debug.Log($"[Splitscreen][MenuSplit] Reparented {_reparentedChildren.Count} children under clip container (with full-screen inner)");
         }
 
         private void RestoreGameMenu()
@@ -210,22 +236,15 @@ namespace ValheimSplitscreen.UI
             _overlayCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _overlayCanvas.sortingOrder = OverlaySortOrder;
 
-            _overlayRoot.AddComponent<GraphicRaycaster>();
+            // No GraphicRaycaster needed — RectMask2D on P1_MenuClip handles raycast blocking
 
             var scaler = _overlayRoot.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1920, 1080);
             scaler.matchWidthOrHeight = 0.5f;
 
-            // Dark panel covering P2's half
-            var darkObj = new GameObject("DarkPanel");
-            darkObj.transform.SetParent(_overlayRoot.transform, false);
-            var darkPanel = darkObj.AddComponent<Image>();
-            darkPanel.color = new Color(0.06f, 0.06f, 0.1f, 1f);
-            darkPanel.raycastTarget = true;
-
-            var darkRT = darkObj.GetComponent<RectTransform>();
-            SetP2Anchors(darkRT);
+            // No dark panel — 3D background shows through on P2's half.
+            // The game menu is confined to P1's half via RectMask2D (ConfineGameMenuToP1Half).
 
             // Divider line between halves
             var divObj = new GameObject("Divider");
@@ -261,6 +280,11 @@ namespace ValheimSplitscreen.UI
             var groupRT = _readyGroup.GetComponent<RectTransform>();
             if (groupRT == null) groupRT = _readyGroup.AddComponent<RectTransform>();
             SetP2Anchors(groupRT);
+
+            // Semi-transparent background so text is readable over the 3D scene
+            var bgImage = _readyGroup.AddComponent<Image>();
+            bgImage.color = new Color(0f, 0f, 0f, 0.55f);
+            bgImage.raycastTarget = false;
 
             var layout = _readyGroup.AddComponent<VerticalLayoutGroup>();
             layout.childAlignment = TextAnchor.MiddleCenter;

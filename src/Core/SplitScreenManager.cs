@@ -31,6 +31,7 @@ namespace ValheimSplitscreen.Core
         public SplitCameraManager CameraManager { get; private set; }
         public SplitPlayerManager PlayerManager { get; private set; }
         public SplitHudManager HudManager { get; private set; }
+        public SplitInventoryManager InventoryManager { get; private set; }
         public CharacterSelectUI CharacterSelect { get; private set; }
         public MenuSplitController MenuSplit { get; private set; }
         public Player2MenuOverlay P2Menu { get; private set; }
@@ -66,6 +67,7 @@ namespace ValheimSplitscreen.Core
             CameraManager = gameObject.AddComponent<SplitCameraManager>();
             PlayerManager = gameObject.AddComponent<SplitPlayerManager>();
             HudManager = gameObject.AddComponent<SplitHudManager>();
+            InventoryManager = gameObject.AddComponent<SplitInventoryManager>();
             CharacterSelect = gameObject.AddComponent<CharacterSelectUI>();
             MenuSplit = gameObject.AddComponent<MenuSplitController>();
             P2Menu = gameObject.AddComponent<Player2MenuOverlay>();
@@ -307,12 +309,22 @@ namespace ValheimSplitscreen.Core
 
             try
             {
-                Debug.Log("[Splitscreen]   Step 4/4: HudManager.OnSplitscreenActivated");
+                Debug.Log("[Splitscreen]   Step 4/5: HudManager.OnSplitscreenActivated");
                 HudManager.OnSplitscreenActivated();
             }
             catch (System.Exception ex)
             {
                 Debug.LogError($"[Splitscreen] Step 4 FAILED: {ex}");
+            }
+
+            try
+            {
+                Debug.Log("[Splitscreen]   Step 5/5: InventoryManager.OnSplitscreenActivated");
+                InventoryManager.OnSplitscreenActivated();
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[Splitscreen] Step 5 FAILED: {ex}");
             }
 
             var p1Post = global::Player.m_localPlayer;
@@ -357,10 +369,11 @@ namespace ValheimSplitscreen.Core
             Debug.Log("[Splitscreen]   Step 0: Hide P2 menu overlay");
             if (P2Menu != null) P2Menu.Hide();
 
-            Debug.Log("[Splitscreen]   Step 1: HudManager + RestoreHudAnchors");
+            Debug.Log("[Splitscreen]   Step 1: HudManager + RestoreHudAnchors + InventoryManager");
             HudManager.OnSplitscreenDeactivated();
             Patches.HudPatches.RestoreHudAnchors();
             Patches.InventoryGuiPatches.RestoreInventoryCanvas();
+            InventoryManager.OnSplitscreenDeactivated();
 
             Debug.Log("[Splitscreen]   Step 2: PlayerManager.DespawnSecondPlayer");
             PlayerManager.DespawnSecondPlayer();
@@ -397,6 +410,7 @@ namespace ValheimSplitscreen.Core
             HudManager.OnSplitscreenDeactivated();
             Patches.HudPatches.RestoreHudAnchors();
             Patches.InventoryGuiPatches.RestoreInventoryCanvas();
+            InventoryManager.OnSplitscreenDeactivated();
             PlayerManager.DespawnSecondPlayer();
             CameraManager.OnSplitscreenDeactivated();
             InputManager.OnSplitscreenDeactivated();

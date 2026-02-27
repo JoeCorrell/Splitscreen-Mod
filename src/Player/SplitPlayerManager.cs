@@ -257,8 +257,8 @@ namespace ValheimSplitscreen.Player
 
             try
             {
-                // Only block P2 combat/look when P2 actually owns the open UI panel.
-                bool p2OwnsInventory = InventoryGui.IsVisible() && Patches.InventoryGuiPatches.ActiveOwnerPlayerIndex == 1;
+                // Block P2 combat/look when P2's dedicated inventory clone is open.
+                bool p2OwnsInventory = HUD.SplitInventoryManager.Instance?.P2InventoryOpen == true;
                 bool inInventoryEtc = p2OwnsInventory || Minimap.IsOpen();
                 bool inPieceSelection = Hud.IsPieceSelectionVisible();
                 bool inRadial = Hud.InRadial();

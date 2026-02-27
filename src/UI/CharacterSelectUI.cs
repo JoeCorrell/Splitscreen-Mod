@@ -3,18 +3,27 @@ using System.Collections.Generic;
 using System.Reflection;
 using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
 using UnityEngine.UI;
 
 namespace ValheimSplitscreen.UI
 {
     /// <summary>
     /// Character selection UI for Player 2.
-    /// Clones the real game character select panel (carousel style: Left/Right arrows to cycle).
-    /// Renders on a ScreenSpaceOverlay canvas positioned in P2's half.
+    /// Clones the full game menu canvas (like the P2 pause menu approach) and
+    /// activates the character select sub-panel in P2's half. This gives P2
+    /// the native game look instead of a custom dark background overlay.
     /// </summary>
     public class CharacterSelectUI : MonoBehaviour
     {
         public static CharacterSelectUI Instance { get; private set; }
+
+        /// <summary>
+        /// Set to true around Instantiate calls so Harmony prefixes can skip
+        /// FejdStartup.Awake on cloned instances (prevents singleton clobbering).
+        /// </summary>
+        public static bool IsCloning { get; set; }
 
         public bool IsVisible { get; private set; }
         public bool IsMainMenuMode { get; set; }
@@ -25,7 +34,7 @@ namespace ValheimSplitscreen.UI
         private Action<PlayerProfile> _onSelected;
         private Action _onCancelled;
 
-        // Cloned character select UI
+        // Cloned canvas (entire game UI)
         private GameObject _canvasRoot;
         private Canvas _canvas;
         private TMP_Text _characterNameText;
@@ -37,12 +46,41 @@ namespace ValheimSplitscreen.UI
         private CursorLockMode _prevCursorLock;
         private bool _prevCursorVisible;
 
+        // 3D character preview: override FejdStartup's camera and character model
+        private bool _overridingCamera;
+
+        // Gamepad input for P2 character select (menu context — SplitInputManager isn't active yet)
+        private ValheimSplitscreen.Input.PlayerInputState _p2MenuInput = new ValheimSplitscreen.Input.PlayerInputState();
+        private float _stickCycleCooldown;
+        private const float StickCycleInterval = 0.3f;
+        private int _inputGraceFrames; // ignore input for N frames after Show() to avoid capturing the menu button press
+
+        // Reflection cache for FejdStartup 3D preview
+        private static readonly BindingFlags BF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        private static readonly FieldInfo _fejdMainCamera = typeof(FejdStartup).GetField("m_mainCamera", BF);
+        private static readonly FieldInfo _fejdCameraMarkerChar = typeof(FejdStartup).GetField("m_cameraMarkerCharacter", BF);
+        private static readonly FieldInfo _fejdCameraMarkerMain = typeof(FejdStartup).GetField("m_cameraMarkerMain", BF);
+        private static readonly FieldInfo _fejdPlayerInstance = typeof(FejdStartup).GetField("m_playerInstance", BF);
+        private static readonly MethodInfo _fejdSetupPreview = FindFejdMethod("SetupCharacterPreview");
+        private static readonly MethodInfo _fejdClearPreview = FindFejdMethod("ClearCharacterPreview");
+
+        // EventSystem input module — disabled while P2 char select is open
+        // to prevent the gamepad from also navigating P1's menu
+        private BaseInputModule _disabledInputModule;
+
         // Fallback IMGUI (used only when cloning fails)
         private bool _useFallbackIMGUI;
         private Vector2 _scrollPos;
         private GUIStyle _buttonStyle;
         private GUIStyle _headerStyle;
         private bool _stylesInit;
+
+        private static MethodInfo FindFejdMethod(string name)
+        {
+            foreach (var m in typeof(FejdStartup).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                if (m.Name == name) return m;
+            return null;
+        }
 
         private void Awake()
         {
@@ -51,14 +89,27 @@ namespace ValheimSplitscreen.UI
 
         public void Show(Action<PlayerProfile> onSelected, Action onCancelled)
         {
+            Debug.Log($"[Splitscreen][CharSelect] Show() called — IsMainMenuMode={IsMainMenuMode}, IsMenuSplitMode={IsMenuSplitMode}");
+
+            // Clean up previous state if Show() is called while already visible
+            if (IsVisible)
+            {
+                Debug.LogWarning("[Splitscreen][CharSelect] Show() called while already visible — cleaning up first");
+                Hide();
+            }
+
             _onSelected = onSelected;
             _onCancelled = onCancelled;
 
             Debug.Log("[Splitscreen][CharSelect] Loading player profiles...");
             _profiles = SaveSystem.GetAllPlayerProfiles();
             Debug.Log($"[Splitscreen][CharSelect] Found {_profiles.Count} profiles");
+            for (int i = 0; i < _profiles.Count; i++)
+                Debug.Log($"[Splitscreen][CharSelect]   Profile[{i}]: {_profiles[i].GetName()}");
 
             _selectedIndex = 0;
+            _stickCycleCooldown = 0f;
+            _inputGraceFrames = 3; // ignore gamepad for 3 frames so the menu A-press doesn't auto-select
 
             if (!IsMainMenuMode)
             {
@@ -71,16 +122,29 @@ namespace ValheimSplitscreen.UI
             _useFallbackIMGUI = false;
             IsVisible = true;
 
+            // Log available gamepads for P2 input
+            Debug.Log($"[Splitscreen][CharSelect] Available gamepads: {Gamepad.all.Count}");
+            for (int i = 0; i < Gamepad.all.Count; i++)
+                Debug.Log($"[Splitscreen][CharSelect]   Gamepad[{i}]: {Gamepad.all[i].displayName}");
+
             if (!CreateClonedPanel())
             {
-                Debug.LogWarning("[Splitscreen][CharSelect] Failed to clone game panel, using fallback IMGUI");
+                Debug.LogWarning("[Splitscreen][CharSelect] Failed to clone game canvas, using fallback IMGUI");
                 _useFallbackIMGUI = true;
             }
+
+            // Disable EventSystem input module to prevent P2's gamepad from
+            // also navigating P1's menu buttons via Unity's EventSystem
+            DisableEventSystemInput();
         }
 
         public void Hide()
         {
+            Debug.Log($"[Splitscreen][CharSelect] Hide() called — IsVisible={IsVisible}, IsMenuSplitMode={IsMenuSplitMode}");
             IsVisible = false;
+            StopCharacterPreview();
+            RestoreEventSystemInput();
+
             if (!IsMainMenuMode && !IsMenuSplitMode)
             {
                 Cursor.lockState = _prevCursorLock;
@@ -98,21 +162,132 @@ namespace ValheimSplitscreen.UI
                 _leftButton = null;
                 _rightButton = null;
             }
+            Debug.Log("[Splitscreen][CharSelect] Hidden and cleaned up");
         }
 
         private void Update()
         {
             if (!IsVisible) return;
 
-            if (UnityEngine.InputSystem.Keyboard.current != null &&
-                UnityEngine.InputSystem.Keyboard.current.escapeKey.wasPressedThisFrame)
+            // Keyboard: ESC to cancel
+            if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {
+                Debug.Log("[Splitscreen][CharSelect] ESC pressed, cancelling");
                 Hide();
                 _onCancelled?.Invoke();
+                return;
+            }
+
+            // P2 gamepad input for character select navigation
+            HandleP2GamepadInput();
+        }
+
+        /// <summary>
+        /// Read P2's gamepad (or keyboard fallback) and handle character select navigation.
+        /// D-pad Left/Right or Left stick = cycle characters.
+        /// A (ButtonSouth) = select. B (ButtonEast) = back/cancel.
+        /// </summary>
+        private void HandleP2GamepadInput()
+        {
+            // Grace period: ignore input for a few frames after Show() to prevent
+            // the A-button press that opened the menu from immediately selecting a character
+            if (_inputGraceFrames > 0)
+            {
+                _inputGraceFrames--;
+                return;
+            }
+
+            // Find P2's gamepad: use SplitInputManager if available, otherwise use second gamepad
+            Gamepad p2Gamepad = null;
+            var inputMgr = ValheimSplitscreen.Input.SplitInputManager.Instance;
+            if (inputMgr != null)
+            {
+                p2Gamepad = inputMgr.GetGamepad(1);
+            }
+            else
+            {
+                // Fallback: if P1 uses keyboard, P2 gets first gamepad; otherwise P2 gets second
+                int gpCount = Gamepad.all.Count;
+                if (gpCount >= 2)
+                    p2Gamepad = Gamepad.all[1];
+                else if (gpCount == 1)
+                    p2Gamepad = Gamepad.all[0]; // assume P1 is on keyboard
+            }
+
+            // Read input state with edge detection
+            if (p2Gamepad != null)
+                _p2MenuInput.ReadFromGamepad(p2Gamepad);
+            else
+                _p2MenuInput.ReadFromKeyboardFallback();
+
+            // D-pad Left/Right: cycle characters (edge-triggered)
+            if (_p2MenuInput.DpadLeftDown)
+            {
+                Debug.Log("[Splitscreen][CharSelect] P2 gamepad: D-pad Left");
+                OnLeftClicked();
+            }
+            else if (_p2MenuInput.DpadRightDown)
+            {
+                Debug.Log("[Splitscreen][CharSelect] P2 gamepad: D-pad Right");
+                OnRightClicked();
+            }
+
+            // Left stick horizontal: cycle with cooldown
+            float stickX = _p2MenuInput.MoveAxis.x;
+            if (_stickCycleCooldown > 0f)
+            {
+                _stickCycleCooldown -= Time.unscaledDeltaTime;
+            }
+            else if (Mathf.Abs(stickX) > 0.5f)
+            {
+                if (stickX < -0.5f)
+                {
+                    Debug.Log("[Splitscreen][CharSelect] P2 gamepad: Stick Left");
+                    OnLeftClicked();
+                }
+                else
+                {
+                    Debug.Log("[Splitscreen][CharSelect] P2 gamepad: Stick Right");
+                    OnRightClicked();
+                }
+                _stickCycleCooldown = StickCycleInterval;
+            }
+
+            // A button (ButtonSouth): select character
+            if (_p2MenuInput.ButtonSouthDown)
+            {
+                Debug.Log("[Splitscreen][CharSelect] P2 gamepad: A pressed (select)");
+                OnStartClicked();
+            }
+
+            // B button (ButtonEast): back/cancel
+            if (_p2MenuInput.ButtonEastDown)
+            {
+                Debug.Log("[Splitscreen][CharSelect] P2 gamepad: B pressed (back)");
+                OnBackClicked();
             }
         }
 
-        // ===== CLONED PANEL CREATION =====
+        /// <summary>
+        /// Called from the Harmony postfix on FejdStartup.UpdateCamera.
+        /// Overrides camera position to the character select campfire scene
+        /// immediately after the game positions the camera each frame.
+        /// </summary>
+        public void OverrideCameraFromPatch(FejdStartup fejd)
+        {
+            if (!_overridingCamera || fejd == null) return;
+
+            var camObj = _fejdMainCamera?.GetValue(fejd) as GameObject;
+            var marker = _fejdCameraMarkerChar?.GetValue(fejd) as Transform;
+
+            if (camObj != null && marker != null)
+            {
+                camObj.transform.position = marker.position;
+                camObj.transform.rotation = marker.rotation;
+            }
+        }
+
+        // ===== FULL CANVAS CLONE (like P2 pause menu approach) =====
 
         private bool CreateClonedPanel()
         {
@@ -123,36 +298,133 @@ namespace ValheimSplitscreen.UI
                 return false;
             }
 
-            GameObject charSelectPanel = FindCharacterSelectPanel(fejd);
-            if (charSelectPanel == null)
+            Canvas sourceCanvas = FindRootMenuCanvas(fejd);
+            if (sourceCanvas == null)
             {
-                Debug.LogWarning("[Splitscreen][CharSelect] Could not find character select panel");
+                Debug.LogWarning("[Splitscreen][CharSelect] Could not find root menu canvas");
                 return false;
             }
 
-            Debug.Log($"[Splitscreen][CharSelect] Cloning panel: '{charSelectPanel.name}'");
+            Debug.Log($"[Splitscreen][CharSelect] Cloning full canvas: '{sourceCanvas.gameObject.name}', children={sourceCanvas.transform.childCount}");
 
-            // Create canvas for P2's character select
-            _canvasRoot = new GameObject("P2_CharSelectCanvas");
+            // Clone the entire canvas hierarchy to get the native game UI look.
+            // Set IsCloning flag so Harmony prefix skips FejdStartup.Awake on the clone
+            // (prevents the clone from clobbering FejdStartup.instance).
+            IsCloning = true;
+            _canvasRoot = Instantiate(sourceCanvas.gameObject);
+            IsCloning = false;
+            _canvasRoot.name = "P2_CharSelectCanvas";
             _canvasRoot.transform.SetParent(null, false);
             DontDestroyOnLoad(_canvasRoot);
 
-            _canvas = _canvasRoot.AddComponent<Canvas>();
-            _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            _canvas.sortingOrder = MenuSplitController.CharSelectSortOrder;
+            // Strip game scripts to avoid singleton conflicts
+            StripScripts(_canvasRoot);
+            DisableButtonTips(_canvasRoot);
 
-            _canvasRoot.AddComponent<GraphicRaycaster>();
+            // Undo P1 menu confinement structure if it was included in the clone
+            UndoP1ConfinementInClone();
 
-            var scaler = _canvasRoot.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920, 1080);
-            scaler.matchWidthOrHeight = 0.5f;
+            // Configure canvas as ScreenSpaceOverlay above the game menu
+            _canvas = _canvasRoot.GetComponent<Canvas>();
+            if (_canvas != null)
+            {
+                _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                _canvas.sortingOrder = MenuSplitController.CharSelectSortOrder;
+            }
 
-            // Dark background behind the cloned panel (prevents purple/transparent artifacts)
-            var bgObj = new GameObject("DarkBackground");
-            bgObj.transform.SetParent(_canvasRoot.transform, false);
+            // Keep the source CanvasScaler (ScaleWithScreenSize matching the game)
+
+            // Clip the clone to P2's half using a RectMask2D container
+            ClipToP2Half();
+
+            // Activate only the character select panel, hide everything else
+            ActivateCharSelectOnly(_canvasRoot);
+
+            // Wire up carousel and bottom buttons for P2
+            WireUpCarousel(_canvasRoot);
+            WireUpBottomButtons(_canvasRoot);
+
+            // Update title for P2
+            UpdateTitleForP2(_canvasRoot);
+
+            // Position the character select content lower in P2's half
+            PositionContentLower(_canvasRoot);
+
+            // Show initial character
+            UpdateCharacterDisplay();
+
+            // Start 3D character preview (camera override + character model)
+            StartCharacterPreview();
+
+            Debug.Log($"[Splitscreen][CharSelect] Full canvas clone created, {_profiles.Count} characters available");
+            return true;
+        }
+
+        private Canvas FindRootMenuCanvas(FejdStartup fejd)
+        {
+            // Try FejdStartup's own parent canvas
+            var canvas = fejd.GetComponentInParent<Canvas>();
+            if (canvas != null && canvas.isRootCanvas)
+            {
+                Debug.Log($"[Splitscreen][CharSelect] Found root canvas via FejdStartup parent: '{canvas.gameObject.name}'");
+                return canvas;
+            }
+
+            // Fallback: find root ScreenSpaceOverlay canvas that isn't ours
+            var allCanvases = UnityEngine.Object.FindObjectsByType<Canvas>(FindObjectsSortMode.None);
+            foreach (var c in allCanvases)
+            {
+                if (c.isRootCanvas && c.renderMode == RenderMode.ScreenSpaceOverlay &&
+                    c.gameObject.name != "SplitscreenMenuOverlay" &&
+                    c.gameObject.name != "P2_CharSelectCanvas")
+                {
+                    Debug.Log($"[Splitscreen][CharSelect] Found root canvas by search: '{c.gameObject.name}'");
+                    return c;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// If MenuSplitController confined the game menu before we cloned it,
+        /// the clone contains a P1_MenuClip wrapper. Undo that so the clone
+        /// has a clean hierarchy for our own P2 clipping.
+        /// </summary>
+        private void UndoP1ConfinementInClone()
+        {
+            if (_canvasRoot == null) return;
+            var p1Clip = _canvasRoot.transform.Find("P1_MenuClip");
+            if (p1Clip == null) return;
+
+            Debug.Log($"[Splitscreen][CharSelect] Undoing P1_MenuClip in clone ({p1Clip.childCount} children)");
+            var children = new List<Transform>();
+            for (int i = 0; i < p1Clip.childCount; i++)
+                children.Add(p1Clip.GetChild(i));
+            foreach (var c in children)
+                c.SetParent(_canvasRoot.transform, false);
+            Destroy(p1Clip.gameObject);
+        }
+
+        /// <summary>
+        /// Creates a RectMask2D clip container anchored to P2's half,
+        /// then reparents all existing canvas children under it.
+        /// This confines the cloned UI to P2's screen area.
+        /// </summary>
+        private void ClipToP2Half()
+        {
+            // Create clip container
+            var clipObj = new GameObject("P2_HalfClip");
+            clipObj.transform.SetParent(_canvasRoot.transform, false);
+            var clipRT = clipObj.AddComponent<RectTransform>();
+            PositionInP2Half(clipRT);
+            clipObj.AddComponent<RectMask2D>();
+
+            // Semi-transparent background so 3D scene peeks through behind the UI
+            var bgObj = new GameObject("DimBackground");
+            bgObj.transform.SetParent(clipObj.transform, false);
             var bgImage = bgObj.AddComponent<Image>();
-            bgImage.color = new Color(0.06f, 0.06f, 0.1f, 1f);
+            bgImage.color = new Color(0f, 0f, 0.02f, 0.45f);
             bgImage.raycastTarget = false;
             var bgRT = bgObj.GetComponent<RectTransform>();
             bgRT.anchorMin = Vector2.zero;
@@ -160,99 +432,102 @@ namespace ValheimSplitscreen.UI
             bgRT.offsetMin = Vector2.zero;
             bgRT.offsetMax = Vector2.zero;
 
-            // Clone the panel
-            var panelClone = Instantiate(charSelectPanel, _canvasRoot.transform, false);
-            panelClone.name = "P2_CharSelectPanel";
-            panelClone.SetActive(true);
-
-            // Strip non-essential scripts
-            StripScripts(panelClone);
-
-            // Disable ButtonTip / KeyHint elements (they show broken references)
-            DisableButtonTips(panelClone);
-
-            // Position in P2's half
-            var panelRT = panelClone.GetComponent<RectTransform>();
-            if (panelRT != null)
-                PositionInP2Half(panelRT);
-
-            // Activate the SelectCharacter sub-panel (it may be inactive)
-            ActivateSelectCharacterPanel(panelClone);
-
-            // Wire up the carousel controls
-            WireUpCarousel(panelClone);
-
-            // Wire up bottom buttons
-            WireUpBottomButtons(panelClone);
-
-            // Update title for P2
-            UpdateTitleForP2(panelClone);
-
-            // Show initial character
-            UpdateCharacterDisplay();
-
-            Debug.Log($"[Splitscreen][CharSelect] Cloned carousel panel, {_profiles.Count} characters available");
-            return true;
-        }
-
-        private GameObject FindCharacterSelectPanel(FejdStartup fejd)
-        {
-            string[] fieldNames = {
-                "m_characterSelectScreen", "m_selectCharacterPanel",
-                "m_characterList", "m_charSelectPanel"
-            };
-
-            var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-            foreach (var name in fieldNames)
+            // Collect existing children (skip our clip container)
+            var children = new List<Transform>();
+            for (int i = 0; i < _canvasRoot.transform.childCount; i++)
             {
-                var field = typeof(FejdStartup).GetField(name, flags);
-                if (field != null)
-                {
-                    var value = field.GetValue(fejd);
-                    if (value is GameObject go)
-                    {
-                        Debug.Log($"[Splitscreen][CharSelect] Found panel via field '{name}'");
-                        return go;
-                    }
-                    if (value is Transform t)
-                    {
-                        Debug.Log($"[Splitscreen][CharSelect] Found panel via field '{name}' (Transform)");
-                        return t.gameObject;
-                    }
-                }
+                var child = _canvasRoot.transform.GetChild(i);
+                if (child.gameObject != clipObj)
+                    children.Add(child);
             }
 
-            // Fallback: search hierarchy by name
-            var transforms = fejd.GetComponentsInChildren<Transform>(true);
-            foreach (var t in transforms)
-            {
-                string goName = t.gameObject.name.ToLowerInvariant();
-                if (goName.Contains("characterselect") || goName.Contains("charselect") ||
-                    goName.Contains("selectcharacter"))
-                {
-                    Debug.Log($"[Splitscreen][CharSelect] Found panel by name: '{t.gameObject.name}'");
-                    return t.gameObject;
-                }
-            }
+            // Reparent all children under the clip container
+            foreach (var child in children)
+                child.SetParent(clipObj.transform, false);
 
-            return null;
+            Debug.Log($"[Splitscreen][CharSelect] Clipped {children.Count} children to P2 half");
         }
 
-        private void ActivateSelectCharacterPanel(GameObject panelClone)
+        /// <summary>
+        /// In the cloned hierarchy, hide everything except the path from
+        /// CharacterSelection to root. At every ancestor level, hide all
+        /// siblings that aren't in the path — this catches MainMenu, Logo,
+        /// StartGame, etc. at any nesting depth.
+        /// </summary>
+        private void ActivateCharSelectOnly(GameObject root)
         {
-            // The SelectCharacter sub-panel might be inactive; activate it
-            var transforms = panelClone.GetComponentsInChildren<Transform>(true);
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+
+            // First: find the CharacterSelection panel
+            Transform charSelectPanel = null;
             foreach (var t in transforms)
             {
-                if (t.gameObject.name == "SelectCharacter")
+                string name = t.gameObject.name;
+                if (name == "CharacterSelection" || name == "characterSelection" ||
+                    name == "SelectCharacter" || name == "selectCharacter" ||
+                    name == "CharacterSelect" || name == "characterSelect" ||
+                    name.ToLowerInvariant().Contains("characterselect") ||
+                    name.ToLowerInvariant().Contains("selectcharacter"))
                 {
-                    t.gameObject.SetActive(true);
-                    Debug.Log("[Splitscreen][CharSelect] Activated SelectCharacter sub-panel");
+                    charSelectPanel = t;
+                    Debug.Log($"[Splitscreen][CharSelect] Found character select panel: '{name}'");
                     break;
                 }
             }
 
-            // Hide NewCharacterPanel and RemoveCharacterDialog
+            if (charSelectPanel == null)
+            {
+                Debug.LogWarning("[Splitscreen][CharSelect] Could not find character select panel by name, trying field search");
+                charSelectPanel = FindCharSelectTransform(root, transforms);
+            }
+
+            if (charSelectPanel == null)
+            {
+                Debug.LogError("[Splitscreen][CharSelect] Could not find character select panel at all!");
+                return;
+            }
+
+            // Build set of transforms in the path from CharacterSelection to root
+            var enablePath = new HashSet<Transform>();
+            var walk = charSelectPanel;
+            while (walk != null && walk != root.transform)
+            {
+                enablePath.Add(walk);
+                walk = walk.parent;
+            }
+
+            // At every level of the path, hide siblings that aren't in the path.
+            // This catches MainMenu, Logo, StartGame, etc. at any nesting depth.
+            foreach (var pathNode in new List<Transform>(enablePath))
+            {
+                var parent = pathNode.parent;
+                if (parent == null) continue;
+
+                for (int i = 0; i < parent.childCount; i++)
+                {
+                    var sibling = parent.GetChild(i);
+                    if (enablePath.Contains(sibling)) continue;
+                    if (sibling.name == "DimBackground" || sibling.name == "P2_HalfClip") continue;
+
+                    if (sibling.gameObject.activeSelf)
+                    {
+                        Debug.Log($"[Splitscreen][CharSelect] Hiding sibling: '{sibling.name}' (parent='{parent.name}')");
+                        sibling.gameObject.SetActive(false);
+                    }
+                }
+            }
+
+            // Enable the character select panel and all ancestors in the path
+            charSelectPanel.gameObject.SetActive(true);
+            var ancestor = charSelectPanel.parent;
+            while (ancestor != null && ancestor != root.transform)
+            {
+                ancestor.gameObject.SetActive(true);
+                ancestor = ancestor.parent;
+            }
+            Debug.Log($"[Splitscreen][CharSelect] Activated character select panel: '{charSelectPanel.name}'");
+
+            // Hide sub-panels that should stay hidden even inside char select
             foreach (var t in transforms)
             {
                 string n = t.gameObject.name;
@@ -261,6 +536,21 @@ namespace ValheimSplitscreen.UI
                     t.gameObject.SetActive(false);
                 }
             }
+        }
+
+        private Transform FindCharSelectTransform(GameObject root, Transform[] transforms)
+        {
+            foreach (var t in transforms)
+            {
+                string goName = t.gameObject.name.ToLowerInvariant();
+                if (goName.Contains("characterselect") || goName.Contains("charselect") ||
+                    goName.Contains("selectcharacter"))
+                {
+                    Debug.Log($"[Splitscreen][CharSelect] Found panel by pattern: '{t.gameObject.name}'");
+                    return t;
+                }
+            }
+            return null;
         }
 
         private void WireUpCarousel(GameObject panelClone)
@@ -369,6 +659,136 @@ namespace ValheimSplitscreen.UI
             rt.pivot = new Vector2(0.5f, 0.5f);
         }
 
+        /// <summary>
+        /// Move the active character select panel lower in P2's half so it's not
+        /// floating in the center. Adjusts the anchoredPosition downward.
+        /// </summary>
+        private void PositionContentLower(GameObject root)
+        {
+            // Find the active character select panel
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            foreach (var t in transforms)
+            {
+                if (!t.gameObject.activeSelf) continue;
+                string name = t.gameObject.name;
+                if (name == "CharacterSelection" || name == "characterSelection" ||
+                    name == "SelectCharacter" || name == "selectCharacter" ||
+                    name == "CharacterSelect" || name == "characterSelect" ||
+                    name.ToLowerInvariant().Contains("characterselect") ||
+                    name.ToLowerInvariant().Contains("selectcharacter"))
+                {
+                    var rt = t.GetComponent<RectTransform>();
+                    if (rt != null)
+                    {
+                        // Anchor to bottom-center of the container and offset up slightly
+                        rt.anchorMin = new Vector2(0f, 0f);
+                        rt.anchorMax = new Vector2(1f, 0.85f);
+                        rt.offsetMin = Vector2.zero;
+                        rt.offsetMax = Vector2.zero;
+                        Debug.Log($"[Splitscreen][CharSelect] Repositioned '{name}' to lower area");
+                    }
+                    break;
+                }
+            }
+        }
+
+        // ===== 3D CHARACTER PREVIEW =====
+
+        /// <summary>
+        /// Start overriding the camera and spawn the character preview model.
+        /// Called when the cloned character select UI opens.
+        /// </summary>
+        private void StartCharacterPreview()
+        {
+            var fejd = FejdStartup.instance;
+            if (fejd == null)
+            {
+                Debug.LogWarning("[Splitscreen][CharSelect] StartCharacterPreview: FejdStartup.instance is null, skipping");
+                return;
+            }
+
+            // Log reflection state for debugging
+            // NOTE: m_mainCamera is a GameObject, not a Camera component
+            var camObj = _fejdMainCamera?.GetValue(fejd) as GameObject;
+            var cam = camObj?.GetComponent<UnityEngine.Camera>();
+            var marker = _fejdCameraMarkerChar?.GetValue(fejd) as Transform;
+            var markerMain = _fejdCameraMarkerMain?.GetValue(fejd) as Transform;
+            Debug.Log($"[Splitscreen][CharSelect] Starting 3D preview - reflection fields: " +
+                $"camField={_fejdMainCamera != null}, markerField={_fejdCameraMarkerChar != null}, " +
+                $"setupMethod={_fejdSetupPreview != null}, clearMethod={_fejdClearPreview != null}");
+            Debug.Log($"[Splitscreen][CharSelect] Reflection values: " +
+                $"camObj={(camObj != null ? camObj.name : "NULL")}, " +
+                $"camComponent={(cam != null ? cam.name : "NULL")}, " +
+                $"charMarker={(marker != null ? marker.name + " pos=" + marker.position : "NULL")}, " +
+                $"mainMarker={(markerMain != null ? markerMain.name + " pos=" + markerMain.position : "NULL")}");
+
+            if (camObj == null)
+                Debug.LogError("[Splitscreen][CharSelect] m_mainCamera GameObject is NULL!");
+            else if (cam == null)
+                Debug.LogError("[Splitscreen][CharSelect] m_mainCamera has no Camera component!");
+            if (marker == null)
+                Debug.LogError("[Splitscreen][CharSelect] m_cameraMarkerCharacter is NULL — camera override will not work!");
+
+            _overridingCamera = true;
+            Debug.Log("[Splitscreen][CharSelect] Camera override enabled (via Harmony postfix on FejdStartup.UpdateCamera)");
+
+            // Set up initial character model
+            if (_profiles != null && _profiles.Count > 0 && _selectedIndex >= 0 && _selectedIndex < _profiles.Count)
+            {
+                InvokeSetupPreview(_profiles[_selectedIndex]);
+            }
+        }
+
+        /// <summary>
+        /// Stop overriding the camera and clear the character preview.
+        /// </summary>
+        private void StopCharacterPreview()
+        {
+            Debug.Log("[Splitscreen][CharSelect] Stopping character preview, disabling camera override");
+            _overridingCamera = false;
+
+            var fejd = FejdStartup.instance;
+            if (fejd == null) return;
+
+            // Clear the character model
+            if (_fejdClearPreview != null)
+            {
+                try
+                {
+                    _fejdClearPreview.Invoke(fejd, null);
+                    Debug.Log("[Splitscreen][CharSelect] Cleared character preview");
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[Splitscreen][CharSelect] ClearCharacterPreview failed: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Call FejdStartup.SetupCharacterPreview to spawn/update the 3D character model.
+        /// </summary>
+        private void InvokeSetupPreview(PlayerProfile profile)
+        {
+            var fejd = FejdStartup.instance;
+            if (fejd == null || _fejdSetupPreview == null) return;
+
+            try
+            {
+                var paramCount = _fejdSetupPreview.GetParameters().Length;
+                if (paramCount >= 1)
+                    _fejdSetupPreview.Invoke(fejd, new object[] { profile });
+                else
+                    _fejdSetupPreview.Invoke(fejd, null);
+
+                Debug.Log($"[Splitscreen][CharSelect] SetupCharacterPreview called for '{profile?.GetName()}'");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Splitscreen][CharSelect] SetupCharacterPreview failed: {ex.Message}");
+            }
+        }
+
         // ===== CAROUSEL NAVIGATION =====
 
         private void OnLeftClicked()
@@ -425,6 +845,10 @@ namespace ValheimSplitscreen.UI
                 _characterNameText.text = profile.GetName();
             if (_sourceInfoText != null)
                 _sourceInfoText.text = $"Character {_selectedIndex + 1} of {_profiles.Count}";
+
+            // Update the 3D character model to match the selected profile
+            if (_overridingCamera)
+                InvokeSetupPreview(profile);
         }
 
         private void OnCharacterSelected(PlayerProfile profile)
@@ -476,7 +900,7 @@ namespace ValheimSplitscreen.UI
                     stripped++;
                 }
             }
-            Debug.Log($"[Splitscreen][CharSelect] Stripped {stripped} scripts from panel clone");
+            Debug.Log($"[Splitscreen][CharSelect] Stripped {stripped} scripts from canvas clone");
         }
 
         private static void DisableButtonTips(GameObject root)
@@ -600,8 +1024,34 @@ namespace ValheimSplitscreen.UI
             GUI.color = Color.white;
         }
 
+        private void DisableEventSystemInput()
+        {
+            var es = EventSystem.current;
+            if (es != null)
+            {
+                _disabledInputModule = es.currentInputModule;
+                if (_disabledInputModule != null)
+                {
+                    _disabledInputModule.enabled = false;
+                    Debug.Log($"[Splitscreen][CharSelect] Disabled EventSystem input module ({_disabledInputModule.GetType().Name}) to isolate P2 gamepad");
+                }
+            }
+        }
+
+        private void RestoreEventSystemInput()
+        {
+            if (_disabledInputModule != null)
+            {
+                _disabledInputModule.enabled = true;
+                Debug.Log("[Splitscreen][CharSelect] Restored EventSystem input module");
+                _disabledInputModule = null;
+            }
+        }
+
         private void OnDestroy()
         {
+            RestoreEventSystemInput();
+            _overridingCamera = false;
             if (_canvasRoot != null) Destroy(_canvasRoot);
             Instance = null;
         }
